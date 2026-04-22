@@ -623,7 +623,7 @@ pub fn format_contacts(contacts: &[ContactRecord]) -> String {
                 contact
                     .next_outgoing_drop
                     .as_ref()
-                    .map(|drop| short_drop(drop))
+                    .map(short_drop)
                     .unwrap_or_else(|| "-".to_string())
             )
         })
