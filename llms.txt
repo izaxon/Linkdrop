@@ -1,0 +1,36 @@
+# Linkdrop
+
+> The best chat protocol — simple, powerful, no lock-in, zero dependencies, AI-bot ready. A minimal end-to-end encrypted messaging protocol built on single-use HTTPS "drops": no accounts, no federation, no SDKs. Three HTTP verbs and one JSON envelope.
+
+This file follows the [llms.txt](https://llmstxt.org) convention and is intended for LLM-based agents reading the repository.
+
+## Core docs
+
+- [README.md](README.md): Project overview, "why Linkdrop", 30-second flow diagram, 60-second quick start.
+- [MANIFESTO.md](MANIFESTO.md): Philosophy, beliefs, what the project rejects, winning conditions, call to action.
+- [linkdrop-v1-spec.md](linkdrop-v1-spec.md): Normative wire protocol — JSON shapes, HTTP endpoints, crypto suite, invariants. Source of truth.
+- [AGENTS.md](AGENTS.md): Orientation for AI coding assistants — workspace map, canonical commands, conventions, what not to do.
+
+## Reference implementation (Rust)
+
+- [Cargo.toml](Cargo.toml): Cargo workspace defining the three crates.
+- [crates/linkdrop-protocol/src/lib.rs](crates/linkdrop-protocol/src/lib.rs): Shared protocol crate — re-exports models, crypto, encoding, state.
+- [crates/linkdrop-protocol/src/model.rs](crates/linkdrop-protocol/src/model.rs): `DropRef`, `ContactBundle`, `MessageEnvelope`, `DecryptedPayload` types.
+- [crates/linkdrop-protocol/src/crypto.rs](crates/linkdrop-protocol/src/crypto.rs): X25519 key agreement, HKDF-SHA256, ChaCha20-Poly1305 AEAD, optional Ed25519 signing.
+- [crates/linkdrop-protocol/src/encoding.rs](crates/linkdrop-protocol/src/encoding.rs): base64url helpers and key string formats.
+- [crates/linkdrop-protocol/src/state.rs](crates/linkdrop-protocol/src/state.rs): Local file formats — identity, contacts, client state.
+- [crates/linkdrop-server/src/lib.rs](crates/linkdrop-server/src/lib.rs): Axum router implementing `PUT` / `GET` / `HEAD /drop/{drop_id}` against SQLite.
+- [crates/linkdrop-server/src/main.rs](crates/linkdrop-server/src/main.rs): Server binary CLI.
+- [crates/linkdrop-cli/src/lib.rs](crates/linkdrop-cli/src/lib.rs): `LinkdropApp` API — identity, contacts, send, poll, inbox, history.
+- [crates/linkdrop-cli/src/main.rs](crates/linkdrop-cli/src/main.rs): `linkdrop` binary CLI (clap).
+
+## Tests
+
+- [crates/linkdrop-cli/tests/cli_flow.rs](crates/linkdrop-cli/tests/cli_flow.rs): End-to-end CLI flow against an in-process server.
+- [crates/linkdrop-server/tests/server_api.rs](crates/linkdrop-server/tests/server_api.rs): HTTP-level conformance tests for the drop server.
+
+## Optional
+
+- Build & test: run `cargo test` from the workspace root.
+- Lint: `cargo clippy --all-targets --all-features`.
+- Run server: `cargo run -p linkdrop-server -- --bind 127.0.0.1:8080 --database linkdrop-server.db`.
