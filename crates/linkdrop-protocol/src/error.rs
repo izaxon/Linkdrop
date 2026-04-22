@@ -12,6 +12,8 @@ pub enum ProtocolError {
     Url(#[from] url::ParseError),
     #[error("cryptographic error: {0}")]
     Crypto(&'static str),
+    #[error("signature error: {0}")]
+    Signature(String),
 }
 
 pub type Result<T> = std::result::Result<T, ProtocolError>;

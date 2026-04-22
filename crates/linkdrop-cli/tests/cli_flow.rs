@@ -1,15 +1,12 @@
 use std::{fs, path::Path};
 
 use anyhow::Result;
-use axum::{
-    Router,
-    http::StatusCode,
-    routing::head,
-};
+use axum::{Router, http::StatusCode, routing::head};
 use linkdrop_cli::LinkdropApp;
 use linkdrop_protocol::{
     ClientStateFile, ContactsFile, DecryptedPayload, DropRef, IdentityFile, MessageDirection,
-    MessageStatus, WatchedDrop, encrypt_payload_for_contact,
+    MessageStatus, WatchedDrop, decode_base64url, decrypt_envelope, encode_base64url,
+    encrypt_payload_for_contact,
 };
 use linkdrop_server::spawn_test_server;
 use tempfile::TempDir;
@@ -66,6 +63,22 @@ fn contact_bundle_export_import_round_trips() -> Result<()> {
 }
 
 #[test]
+fn contact_export_uses_preferred_servers_when_omitted() -> Result<()> {
+    let alice_dir = TempDir::new()?;
+    let alice = LinkdropApp::new(alice_dir.path())?;
+    alice.init("Alice")?;
+    alice.add_server("http://127.0.0.1:9301")?;
+    alice.add_server("http://127.0.0.1:9302")?;
+
+    let bundle = alice.export_contact_bundle(&[])?;
+
+    assert_eq!(bundle.initial_drops.len(), 2);
+    assert_eq!(bundle.initial_drops[0].server, "http://127.0.0.1:9301");
+    assert_eq!(bundle.initial_drops[1].server, "http://127.0.0.1:9302");
+    Ok(())
+}
+
+#[test]
 fn message_encryption_decryption_round_trips() -> Result<()> {
     let alice = IdentityFile::generate("Alice");
     let bob = IdentityFile::generate("Bob");
@@ -75,18 +88,38 @@ fn message_encryption_decryption_round_trips() -> Result<()> {
     };
     let payload = DecryptedPayload {
         text: "Hej".to_string(),
+        reply_drop,
         prev_msg_id: None,
     };
 
-    let envelope = encrypt_payload_for_contact(
-        &alice,
-        &bob.tagged_prekey_public_key(),
-        reply_drop,
-        &payload,
-    )?;
-    let decrypted = linkdrop_protocol::decrypt_envelope(&bob, &envelope)?;
+    let envelope =
+        encrypt_payload_for_contact(&alice, &bob.tagged_prekey_public_key(), &payload, true)?;
+    let decrypted = decrypt_envelope(&bob, &envelope)?;
 
-    assert_eq!(decrypted.text, "Hej");
+    assert_eq!(decrypted.payload.text, "Hej");
+    assert_eq!(decrypted.payload.reply_drop, payload.reply_drop);
+    Ok(())
+}
+
+#[test]
+fn reply_drop_is_hidden_inside_ciphertext() -> Result<()> {
+    let alice = IdentityFile::generate("Alice");
+    let bob = IdentityFile::generate("Bob");
+    let payload = DecryptedPayload {
+        text: "Hej".to_string(),
+        reply_drop: DropRef {
+            server: "http://127.0.0.1:9000".to_string(),
+            drop_id: linkdrop_protocol::generate_drop_id(),
+        },
+        prev_msg_id: None,
+    };
+
+    let envelope =
+        encrypt_payload_for_contact(&alice, &bob.tagged_prekey_public_key(), &payload, true)?;
+    let json = serde_json::to_value(&envelope)?;
+
+    assert!(json.get("reply_drop").is_none());
+    assert!(json.get("signature").is_some());
     Ok(())
 }
 
@@ -112,8 +145,8 @@ fn fresh_reply_drop_is_generated_for_each_outbound_message() -> Result<()> {
         write_bundle(&bundle_path, &bundle)?;
         let bob_contact = alice.import_contact_bundle(&bundle_path)?;
 
-        let first = alice.send_message(&bob_contact.contact_id, "one")?;
-        let second = alice.send_message(&bob_contact.contact_id, "two")?;
+        let first = alice.send_message(&bob_contact.contact_id, "one", true)?;
+        let second = alice.send_message(&bob_contact.contact_id, "two", true)?;
         assert_ne!(first.reply_drop_generated, second.reply_drop_generated);
     }
 
@@ -137,16 +170,17 @@ fn duplicate_msg_id_is_ignored() -> Result<()> {
     };
     let payload = DecryptedPayload {
         text: "hello".to_string(),
+        reply_drop: DropRef {
+            server: "http://127.0.0.1:9000".to_string(),
+            drop_id: linkdrop_protocol::generate_drop_id(),
+        },
         prev_msg_id: None,
     };
     let envelope = encrypt_payload_for_contact(
         &alice,
         &bob.whoami()?.tagged_prekey_public_key(),
-        DropRef {
-            server: "http://127.0.0.1:9000".to_string(),
-            drop_id: linkdrop_protocol::generate_drop_id(),
-        },
         &payload,
+        true,
     )?;
 
     let first = bob.process_incoming_envelope(watch.clone(), envelope.clone())?;
@@ -173,13 +207,14 @@ fn duplicate_msg_id_does_not_overwrite_next_outgoing_drop() -> Result<()> {
         },
         contact_id: None,
     };
-    let payload = DecryptedPayload {
-        text: "hello".to_string(),
-        prev_msg_id: None,
-    };
     let first_reply_drop = DropRef {
         server: "http://127.0.0.1:9000".to_string(),
         drop_id: linkdrop_protocol::generate_drop_id(),
+    };
+    let payload = DecryptedPayload {
+        text: "hello".to_string(),
+        reply_drop: first_reply_drop.clone(),
+        prev_msg_id: None,
     };
     let mut duplicate_reply_drop = first_reply_drop.clone();
     duplicate_reply_drop.drop_id = linkdrop_protocol::generate_drop_id();
@@ -187,11 +222,19 @@ fn duplicate_msg_id_does_not_overwrite_next_outgoing_drop() -> Result<()> {
     let envelope = encrypt_payload_for_contact(
         &alice,
         &bob.whoami()?.tagged_prekey_public_key(),
-        first_reply_drop.clone(),
         &payload,
+        true,
     )?;
     let mut duplicate = envelope.clone();
-    duplicate.reply_drop = duplicate_reply_drop;
+    let mut decrypted = decrypt_envelope(&bob.whoami()?, &duplicate)?.payload;
+    decrypted.reply_drop = duplicate_reply_drop;
+    duplicate = encrypt_payload_for_contact(
+        &alice,
+        &bob.whoami()?.tagged_prekey_public_key(),
+        &decrypted,
+        true,
+    )?;
+    duplicate.msg_id = envelope.msg_id.clone();
 
     let _ = bob.process_incoming_envelope(watch.clone(), envelope)?;
     let _ = bob.process_incoming_envelope(watch, duplicate)?;
@@ -202,6 +245,97 @@ fn duplicate_msg_id_does_not_overwrite_next_outgoing_drop() -> Result<()> {
         contacts.contacts[0].next_outgoing_drop.as_ref(),
         Some(&first_reply_drop)
     );
+    Ok(())
+}
+
+#[test]
+fn unsigned_envelopes_are_accepted() -> Result<()> {
+    let alice = IdentityFile::generate("Alice");
+    let bob = IdentityFile::generate("Bob");
+    let payload = DecryptedPayload {
+        text: "unsigned".to_string(),
+        reply_drop: DropRef {
+            server: "http://127.0.0.1:9000".to_string(),
+            drop_id: linkdrop_protocol::generate_drop_id(),
+        },
+        prev_msg_id: None,
+    };
+
+    let envelope =
+        encrypt_payload_for_contact(&alice, &bob.tagged_prekey_public_key(), &payload, false)?;
+    let opened = decrypt_envelope(&bob, &envelope)?;
+
+    assert_eq!(
+        opened.signature_state,
+        linkdrop_protocol::SignatureState::Unsigned
+    );
+    assert_eq!(opened.payload.text, "unsigned");
+    Ok(())
+}
+
+#[test]
+fn tampered_signed_envelope_is_rejected() -> Result<()> {
+    let alice = IdentityFile::generate("Alice");
+    let bob = IdentityFile::generate("Bob");
+    let payload = DecryptedPayload {
+        text: "tamper".to_string(),
+        reply_drop: DropRef {
+            server: "http://127.0.0.1:9000".to_string(),
+            drop_id: linkdrop_protocol::generate_drop_id(),
+        },
+        prev_msg_id: None,
+    };
+
+    let mut envelope =
+        encrypt_payload_for_contact(&alice, &bob.tagged_prekey_public_key(), &payload, true)?;
+    let mut signature = decode_base64url(envelope.signature.as_ref().unwrap())?;
+    signature[0] ^= 0x01;
+    envelope.signature = Some(encode_base64url(&signature));
+
+    assert!(decrypt_envelope(&bob, &envelope).is_err());
+    Ok(())
+}
+
+#[test]
+fn preferred_servers_rotate_reply_drop_generation() -> Result<()> {
+    let runtime = tokio::runtime::Runtime::new()?;
+    let server_dir = TempDir::new()?;
+    let (server, handle) = runtime.block_on(spawn_test_server(
+        server_dir.path().join("server.db"),
+        16 * 1024,
+    ))?;
+    let alice_dir = TempDir::new()?;
+    let bob_dir = TempDir::new()?;
+    let alice = LinkdropApp::new(alice_dir.path())?;
+    let bob = LinkdropApp::new(bob_dir.path())?;
+    alice.init("Alice")?;
+    bob.init("Bob")?;
+    alice.add_server("http://127.0.0.1:9201")?;
+    alice.add_server("http://127.0.0.1:9202")?;
+
+    let bundle = bob.export_contact_bundle(&[server.clone(), server.clone()])?;
+    let bundle_path = server_dir.path().join("bob-bundle.json");
+    write_bundle(&bundle_path, &bundle)?;
+    let bob_contact = alice.import_contact_bundle(&bundle_path)?;
+
+    let first = alice.send_message(&bob_contact.contact_id, "one", false)?;
+    let second = alice.send_message(&bob_contact.contact_id, "two", false)?;
+
+    assert_eq!(
+        first
+            .reply_drop_generated
+            .as_ref()
+            .map(|drop| drop.server.as_str()),
+        Some("http://127.0.0.1:9201")
+    );
+    assert_eq!(
+        second
+            .reply_drop_generated
+            .as_ref()
+            .map(|drop| drop.server.as_str()),
+        Some("http://127.0.0.1:9202")
+    );
+    handle.abort();
     Ok(())
 }
 
@@ -266,10 +400,10 @@ fn send_to_valid_initial_drop_succeeds_end_to_end() -> Result<()> {
         let alice_contact = bob.import_contact_bundle(&alice_bundle_path)?;
         let bob_contact = alice.import_contact_bundle(&bob_bundle_path)?;
 
-        let sent = alice.send_message(&bob_contact.contact_id, "hello bob")?;
+        let sent = alice.send_message(&bob_contact.contact_id, "hello bob", true)?;
         let poll = bob.poll()?;
         let inbox = bob.inbox()?;
-        let bob_reply = bob.send_message(&alice_contact.contact_id, "hello alice")?;
+        let bob_reply = bob.send_message(&alice_contact.contact_id, "hello alice", true)?;
         let poll_back = alice.poll()?;
         let history = alice.history(&bob_contact.contact_id)?;
 

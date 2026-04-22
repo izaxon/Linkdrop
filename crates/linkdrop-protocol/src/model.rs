@@ -61,15 +61,16 @@ pub struct MessageEnvelope {
     pub v: u8,
     pub msg_id: String,
     pub created_at: i64,
-    pub reply_drop: DropRef,
     pub sender_identity_key: String,
     pub sender_ephemeral_key: String,
     pub ciphertext: String,
     pub nonce: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signature: Option<String>,
 }
 
 impl MessageEnvelope {
-    pub fn validate(&self, allow_http_local: bool) -> Result<()> {
+    pub fn validate(&self, _allow_http_local: bool) -> Result<()> {
         if self.v != 1 {
             return Err(ProtocolError::Validation(
                 "message envelope version must be 1".to_string(),
@@ -80,7 +81,6 @@ impl MessageEnvelope {
                 "msg_id must be non-empty base64url".to_string(),
             ));
         }
-        self.reply_drop.validate(allow_http_local)?;
         validate_ed25519_key(&self.sender_identity_key)?;
         validate_x25519_key(&self.sender_ephemeral_key)?;
         if decode_base64url(&self.ciphertext)?.is_empty() {
@@ -93,6 +93,13 @@ impl MessageEnvelope {
                 "nonce must be 12 bytes for ChaCha20-Poly1305".to_string(),
             ));
         }
+        if let Some(signature) = &self.signature {
+            if decode_base64url(signature)?.len() != 64 {
+                return Err(ProtocolError::Validation(
+                    "signature must be 64 bytes when present".to_string(),
+                ));
+            }
+        }
         Ok(())
     }
 }
@@ -100,17 +107,19 @@ impl MessageEnvelope {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DecryptedPayload {
     pub text: String,
+    pub reply_drop: DropRef,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_msg_id: Option<String>,
 }
 
 impl DecryptedPayload {
-    pub fn validate(&self) -> Result<()> {
+    pub fn validate(&self, allow_http_local: bool) -> Result<()> {
         if self.text.is_empty() {
             return Err(ProtocolError::Validation(
                 "payload text must be non-empty".to_string(),
             ));
         }
+        self.reply_drop.validate(allow_http_local)?;
         if let Some(prev) = &self.prev_msg_id {
             if decode_base64url(prev)?.is_empty() {
                 return Err(ProtocolError::Validation(
@@ -120,6 +129,16 @@ impl DecryptedPayload {
         }
         Ok(())
     }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureState {
+    #[default]
+    Unsigned,
+    Signed,
+    Verified,
+    Invalid,
 }
 
 fn validate_ed25519_key(value: &str) -> Result<()> {

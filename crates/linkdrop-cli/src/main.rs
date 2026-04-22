@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use linkdrop_cli::{
-    LinkdropApp, format_contacts, format_messages, format_poll_summary, format_whoami,
+    LinkdropApp, format_contacts, format_messages, format_poll_summary, format_servers,
+    format_whoami,
 };
 
 #[derive(Debug, Parser)]
@@ -35,6 +36,8 @@ enum Command {
         to: String,
         #[arg(long)]
         text: String,
+        #[arg(long, default_value_t = false)]
+        unsigned: bool,
     },
     Poll,
     Inbox,
@@ -42,12 +45,16 @@ enum Command {
         #[arg(long)]
         contact: String,
     },
+    Server {
+        #[command(subcommand)]
+        command: ServerCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum ContactCommand {
     Export {
-        #[arg(long = "server", required = true)]
+        #[arg(long = "server")]
         servers: Vec<String>,
     },
     Import {
@@ -57,6 +64,15 @@ enum ContactCommand {
 
 #[derive(Debug, Subcommand)]
 enum ContactsCommand {
+    List,
+}
+
+#[derive(Debug, Subcommand)]
+enum ServerCommand {
+    Add {
+        #[arg(long)]
+        url: String,
+    },
     List,
 }
 
@@ -87,19 +103,30 @@ fn main() -> Result<()> {
                 println!("{}", format_contacts(&app.list_contacts()?));
             }
         },
-        Command::Send { to, text } => {
-            let message = app.send_message(&to, &text)?;
+        Command::Send { to, text, unsigned } => {
+            let message = app.send_message(&to, &text, !unsigned)?;
             println!("{}", message.msg_id);
         }
         Command::Poll => {
             println!("{}", format_poll_summary(&app.poll()?));
         }
         Command::Inbox => {
-            println!("{}", format_messages(&app.inbox()?));
+            let contacts = app.list_contacts()?;
+            println!("{}", format_messages(&app.inbox()?, &contacts));
         }
         Command::History { contact } => {
-            println!("{}", format_messages(&app.history(&contact)?));
+            let contacts = app.list_contacts()?;
+            println!("{}", format_messages(&app.history(&contact)?, &contacts));
         }
+        Command::Server { command } => match command {
+            ServerCommand::Add { url } => {
+                app.add_server(&url)?;
+                println!("added");
+            }
+            ServerCommand::List => {
+                println!("{}", format_servers(&app.list_servers()?));
+            }
+        },
     }
 
     Ok(())

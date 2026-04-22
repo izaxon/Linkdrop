@@ -7,7 +7,7 @@ use crate::{
     crypto::{signing_key_from_base64, x25519_secret_key},
     encoding::{decode_base64url, encode_base64url, tagged_base64},
     error::{ProtocolError, Result},
-    model::DropRef,
+    model::{DropRef, SignatureState},
 };
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -125,6 +125,10 @@ pub struct ClientStateFile {
     pub v: u8,
     #[serde(default)]
     pub watched_drops: Vec<WatchedDrop>,
+    #[serde(default)]
+    pub preferred_servers: Vec<String>,
+    #[serde(default)]
+    pub next_server_index: usize,
 }
 
 impl Default for ClientStateFile {
@@ -132,6 +136,8 @@ impl Default for ClientStateFile {
         Self {
             v: 1,
             watched_drops: Vec::new(),
+            preferred_servers: Vec::new(),
+            next_server_index: 0,
         }
     }
 }
@@ -175,6 +181,8 @@ pub struct MessageRecord {
     pub received_from_drop: Option<DropRef>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub prev_msg_id: Option<String>,
+    #[serde(default)]
+    pub signature_state: SignatureState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -8,19 +8,20 @@ use tempfile::TempDir;
 
 fn sample_envelope(server: &str) -> String {
     let identity = IdentityFile::generate("Alice");
-    let payload = DecryptedPayload {
-        text: "hello".to_string(),
-        prev_msg_id: None,
-    };
     let reply_drop = DropRef {
         server: server.to_string(),
         drop_id: generate_drop_id(),
     };
+    let payload = DecryptedPayload {
+        text: "hello".to_string(),
+        reply_drop,
+        prev_msg_id: None,
+    };
     let envelope = encrypt_payload_for_contact(
         &identity,
         &identity.tagged_prekey_public_key(),
-        reply_drop,
         &payload,
+        true,
     )
     .unwrap();
     serde_json::to_string(&envelope).unwrap()

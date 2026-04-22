@@ -7,8 +7,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use linkdrop_protocol::{
     ClientStateFile, ContactBundle, ContactRecord, ContactsFile, DecryptedPayload, DropRef,
     IdentityFile, MessageDirection, MessageEnvelope, MessageRecord, MessageStatus, MessagesFile,
-    WatchedDrop, decrypt_envelope, encrypt_payload_for_contact, generate_contact_id,
-    generate_drop_id, validate_server_url,
+    SignatureState, WatchedDrop, decrypt_envelope, encrypt_payload_for_contact,
+    generate_contact_id, generate_drop_id, validate_server_url,
 };
 use serde::{Serialize, de::DeserializeOwned};
 use url::Url;
@@ -60,17 +60,22 @@ impl LinkdropApp {
     }
 
     pub fn export_contact_bundle(&self, servers: &[String]) -> Result<ContactBundle> {
-        if servers.is_empty() {
-            bail!("at least one --server value is required");
-        }
-
         let identity = self.whoami()?;
         let mut client_state =
             self.read_optional_json::<ClientStateFile>(&self.client_state_path())?;
+        let chosen_servers = if servers.is_empty() {
+            if client_state.preferred_servers.is_empty() {
+                bail!("at least one --server value is required, or add a preferred server first");
+            }
+            client_state.preferred_servers.clone()
+        } else {
+            self.register_servers(&mut client_state, servers)?;
+            servers.to_vec()
+        };
 
-        let mut initial_drops = Vec::with_capacity(servers.len());
-        for server in servers {
-            validate_server_url(server, true)
+        let mut initial_drops = Vec::with_capacity(chosen_servers.len());
+        for server in chosen_servers {
+            validate_server_url(&server, true)
                 .with_context(|| format!("invalid server URL {server}"))?;
             let drop_ref = DropRef {
                 server: server.clone(),
@@ -93,6 +98,19 @@ impl LinkdropApp {
         bundle.validate(true)?;
         self.write_json(&self.client_state_path(), &client_state)?;
         Ok(bundle)
+    }
+
+    pub fn add_server(&self, server: &str) -> Result<()> {
+        let mut client_state =
+            self.read_optional_json::<ClientStateFile>(&self.client_state_path())?;
+        self.register_servers(&mut client_state, &[server.to_string()])?;
+        self.write_json(&self.client_state_path(), &client_state)
+    }
+
+    pub fn list_servers(&self) -> Result<Vec<String>> {
+        Ok(self
+            .read_optional_json::<ClientStateFile>(&self.client_state_path())?
+            .preferred_servers)
     }
 
     pub fn import_contact_bundle(&self, bundle_path: &Path) -> Result<ContactRecord> {
@@ -136,7 +154,12 @@ impl LinkdropApp {
             .contacts)
     }
 
-    pub fn send_message(&self, contact_id: &str, text: &str) -> Result<MessageRecord> {
+    pub fn send_message(
+        &self,
+        contact_id: &str,
+        text: &str,
+        sign_envelope: bool,
+    ) -> Result<MessageRecord> {
         if text.trim().is_empty() {
             bail!("message text must not be empty");
         }
@@ -163,8 +186,9 @@ impl LinkdropApp {
         let recipient_prekey = contact.prekey.as_deref().ok_or_else(|| {
             anyhow!("contact {contact_id} has no prekey; import their contact bundle first")
         })?;
+        let reply_server = self.next_reply_server(&mut client_state, &used_drop.server)?;
         let reply_drop = DropRef {
-            server: used_drop.server.clone(),
+            server: reply_server,
             drop_id: generate_drop_id(),
         };
         let prev_msg_id = messages
@@ -175,10 +199,11 @@ impl LinkdropApp {
             .map(|message| message.msg_id.clone());
         let payload = DecryptedPayload {
             text: text.to_string(),
+            reply_drop: reply_drop.clone(),
             prev_msg_id,
         };
         let envelope =
-            encrypt_payload_for_contact(&identity, recipient_prekey, reply_drop.clone(), &payload)?;
+            encrypt_payload_for_contact(&identity, recipient_prekey, &payload, sign_envelope)?;
 
         let response = self
             .client
@@ -209,6 +234,11 @@ impl LinkdropApp {
             reply_drop_generated: Some(reply_drop.clone()),
             received_from_drop: None,
             prev_msg_id: payload.prev_msg_id.clone(),
+            signature_state: if sign_envelope {
+                SignatureState::Signed
+            } else {
+                SignatureState::Unsigned
+            },
         };
 
         if record.status == MessageStatus::Sent {
@@ -305,21 +335,22 @@ impl LinkdropApp {
                 continue;
             }
 
-            contacts.contacts[contact_index].next_outgoing_drop = Some(envelope.reply_drop.clone());
-
             match decrypt_envelope(&identity, &envelope) {
-                Ok(payload) => {
+                Ok(opened) => {
+                    contacts.contacts[contact_index].next_outgoing_drop =
+                        Some(opened.payload.reply_drop.clone());
                     messages.messages.push(MessageRecord {
                         msg_id: envelope.msg_id,
                         contact_id,
                         direction: MessageDirection::Inbound,
                         created_at: envelope.created_at,
-                        text: payload.text,
+                        text: opened.payload.text,
                         status: MessageStatus::Received,
                         used_drop: None,
                         reply_drop_generated: None,
                         received_from_drop: Some(watch.drop),
-                        prev_msg_id: payload.prev_msg_id,
+                        prev_msg_id: opened.payload.prev_msg_id,
+                        signature_state: opened.signature_state,
                     });
                     summary.received += 1;
                 }
@@ -335,6 +366,7 @@ impl LinkdropApp {
                         reply_drop_generated: None,
                         received_from_drop: Some(watch.drop),
                         prev_msg_id: None,
+                        signature_state: SignatureState::Invalid,
                     });
                     summary.invalid += 1;
                 }
@@ -423,20 +455,22 @@ impl LinkdropApp {
         {
             summary.duplicates += 1;
         } else {
-            contacts.contacts[contact_index].next_outgoing_drop = Some(envelope.reply_drop.clone());
             match decrypt_envelope(&identity, &envelope) {
-                Ok(payload) => {
+                Ok(opened) => {
+                    contacts.contacts[contact_index].next_outgoing_drop =
+                        Some(opened.payload.reply_drop.clone());
                     messages.messages.push(MessageRecord {
                         msg_id: envelope.msg_id,
                         contact_id,
                         direction: MessageDirection::Inbound,
                         created_at: envelope.created_at,
-                        text: payload.text,
+                        text: opened.payload.text,
                         status: MessageStatus::Received,
                         used_drop: None,
                         reply_drop_generated: None,
                         received_from_drop: Some(watch.drop),
-                        prev_msg_id: payload.prev_msg_id,
+                        prev_msg_id: opened.payload.prev_msg_id,
+                        signature_state: opened.signature_state,
                     });
                     summary.received += 1;
                 }
@@ -452,6 +486,7 @@ impl LinkdropApp {
                         reply_drop_generated: None,
                         received_from_drop: Some(watch.drop),
                         prev_msg_id: None,
+                        signature_state: SignatureState::Invalid,
                     });
                     summary.invalid += 1;
                 }
@@ -516,6 +551,39 @@ impl LinkdropApp {
         let raw = serde_json::to_string_pretty(value)?;
         fs::write(path, raw).with_context(|| format!("failed to write {}", path.display()))
     }
+
+    fn register_servers(
+        &self,
+        client_state: &mut ClientStateFile,
+        servers: &[String],
+    ) -> Result<()> {
+        for server in servers {
+            validate_server_url(server, true)
+                .with_context(|| format!("invalid server URL {server}"))?;
+            if !client_state
+                .preferred_servers
+                .iter()
+                .any(|known| known == server)
+            {
+                client_state.preferred_servers.push(server.clone());
+            }
+        }
+        Ok(())
+    }
+
+    fn next_reply_server(
+        &self,
+        client_state: &mut ClientStateFile,
+        fallback_server: &str,
+    ) -> Result<String> {
+        if client_state.preferred_servers.is_empty() {
+            return Ok(fallback_server.to_string());
+        }
+        let index = client_state.next_server_index % client_state.preferred_servers.len();
+        let server = client_state.preferred_servers[index].clone();
+        client_state.next_server_index = (index + 1) % client_state.preferred_servers.len();
+        Ok(server)
+    }
 }
 
 fn drop_ref_url(drop: &DropRef) -> Result<Url> {
@@ -545,29 +613,46 @@ pub fn format_contacts(contacts: &[ContactRecord]) -> String {
         .iter()
         .map(|contact| {
             format!(
-                "{}\t{}\t{}",
+                "{}\t{}\tinitial_drops={}\tnext={}",
                 contact.contact_id,
                 contact
                     .display_name
                     .clone()
                     .unwrap_or_else(|| "(unnamed)".to_string()),
-                contact.identity_key
+                contact.initial_drops.len(),
+                contact
+                    .next_outgoing_drop
+                    .as_ref()
+                    .map(|drop| short_drop(drop))
+                    .unwrap_or_else(|| "-".to_string())
             )
         })
         .collect::<Vec<_>>()
         .join("\n")
 }
 
-pub fn format_messages(messages: &[MessageRecord]) -> String {
+pub fn format_messages(messages: &[MessageRecord], contacts: &[ContactRecord]) -> String {
     if messages.is_empty() {
         return "no messages".to_string();
     }
     messages
         .iter()
         .map(|message| {
+            let contact_name = contacts
+                .iter()
+                .find(|contact| contact.contact_id == message.contact_id)
+                .and_then(|contact| contact.display_name.clone())
+                .unwrap_or_else(|| message.contact_id.clone());
             format!(
-                "{}\t{:?}\t{:?}\t{}",
-                message.created_at, message.direction, message.status, message.text
+                "{}\t{}\t{}\t{}\t{}",
+                message.created_at,
+                match message.direction {
+                    MessageDirection::Inbound => "<-",
+                    MessageDirection::Outbound => "->",
+                },
+                contact_name,
+                format_message_meta(message),
+                message.text
             )
         })
         .collect::<Vec<_>>()
@@ -575,8 +660,33 @@ pub fn format_messages(messages: &[MessageRecord]) -> String {
 }
 
 pub fn format_poll_summary(summary: &PollSummary) -> String {
+    if summary.received == 0 && summary.duplicates == 0 && summary.invalid == 0 {
+        return "poll complete: no new messages".to_string();
+    }
     format!(
-        "received: {}, duplicates: {}, invalid: {}",
+        "poll complete: received {}, duplicates {}, invalid {}",
         summary.received, summary.duplicates, summary.invalid
+    )
+}
+
+pub fn format_servers(servers: &[String]) -> String {
+    if servers.is_empty() {
+        return "no preferred servers".to_string();
+    }
+    servers.join("\n")
+}
+
+fn short_drop(drop: &DropRef) -> String {
+    format!(
+        "{}#{}",
+        drop.server,
+        &drop.drop_id[..drop.drop_id.len().min(8)]
+    )
+}
+
+fn format_message_meta(message: &MessageRecord) -> String {
+    format!(
+        "{:?},{:?},{:?}",
+        message.direction, message.status, message.signature_state
     )
 }
