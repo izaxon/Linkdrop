@@ -390,8 +390,8 @@ fn send_to_valid_initial_drop_succeeds_end_to_end() -> Result<()> {
         alice.init("Alice")?;
         bob.init("Bob")?;
 
-        let alice_bundle = alice.export_contact_bundle(&[server.clone()])?;
-        let bob_bundle = bob.export_contact_bundle(&[server.clone()])?;
+        let alice_bundle = alice.export_contact_bundle(std::slice::from_ref(&server))?;
+        let bob_bundle = bob.export_contact_bundle(std::slice::from_ref(&server))?;
         let alice_bundle_path = server_dir.path().join("alice-bundle.json");
         let bob_bundle_path = server_dir.path().join("bob-bundle.json");
         write_bundle(&alice_bundle_path, &alice_bundle)?;
