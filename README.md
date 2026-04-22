@@ -2,6 +2,8 @@
 
 Rust reference implementation of the Linkdrop protocol in `linkdrop-v1-spec.md`, with a minimalist server and a stronger client-side message chain.
 
+For end-user setup and day-to-day usage, see [`USER_MANUAL.md`](USER_MANUAL.md).
+
 ## Workspace layout
 
 - `crates/linkdrop-protocol` - shared protocol models, validation, key handling, encoding, and crypto helpers
