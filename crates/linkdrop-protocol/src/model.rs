@@ -93,12 +93,12 @@ impl MessageEnvelope {
                 "nonce must be 12 bytes for ChaCha20-Poly1305".to_string(),
             ));
         }
-        if let Some(signature) = &self.signature {
-            if decode_base64url(signature)?.len() != 64 {
-                return Err(ProtocolError::Validation(
-                    "signature must be 64 bytes when present".to_string(),
-                ));
-            }
+        if let Some(signature) = &self.signature
+            && decode_base64url(signature)?.len() != 64
+        {
+            return Err(ProtocolError::Validation(
+                "signature must be 64 bytes when present".to_string(),
+            ));
         }
         Ok(())
     }
@@ -120,12 +120,12 @@ impl DecryptedPayload {
             ));
         }
         self.reply_drop.validate(allow_http_local)?;
-        if let Some(prev) = &self.prev_msg_id {
-            if decode_base64url(prev)?.is_empty() {
-                return Err(ProtocolError::Validation(
-                    "prev_msg_id must be non-empty base64url".to_string(),
-                ));
-            }
+        if let Some(prev) = &self.prev_msg_id
+            && decode_base64url(prev)?.is_empty()
+        {
+            return Err(ProtocolError::Validation(
+                "prev_msg_id must be non-empty base64url".to_string(),
+            ));
         }
         Ok(())
     }

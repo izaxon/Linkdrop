@@ -53,7 +53,7 @@ pub fn encrypt_payload_for_contact(
 
     let recipient_public = x25519_public_key(recipient_prekey)?;
     let mut rng = OsRng;
-    let ephemeral_secret = StaticSecret::random_from_rng(&mut rng);
+    let ephemeral_secret = StaticSecret::random_from_rng(rng);
     let ephemeral_public = PublicKey::from(&ephemeral_secret);
     let shared_secret = ephemeral_secret.diffie_hellman(&recipient_public);
     let key = derive_message_key(shared_secret.as_bytes())?;

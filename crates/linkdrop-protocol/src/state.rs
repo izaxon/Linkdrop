@@ -25,7 +25,7 @@ impl IdentityFile {
         let mut rng = OsRng;
         let signing_key = SigningKey::generate(&mut rng);
         let verify_key = signing_key.verifying_key();
-        let prekey_secret = StaticSecret::random_from_rng(&mut rng);
+        let prekey_secret = StaticSecret::random_from_rng(rng);
         let prekey_public = PublicKey::from(&prekey_secret);
 
         Self {
