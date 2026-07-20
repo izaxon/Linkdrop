@@ -1,1054 +1,281 @@
 # Linkdrop V1 Specification
 
 Version: 1.0  
-Status: Draft / implementation-ready  
-Scope: Minimal 1:1 encrypted store-and-forward messaging using write-once drops on interchangeable HTTPS drop servers.
+Status: Frozen reference profile  
+Frozen: 2026-07-20  
+Scope: Minimal 1:1 encrypted store-and-forward messaging using write-once drops on interchangeable HTTPS servers.
 
----
+This document is normative for wire version `v: 1`. The words MUST, MUST NOT, SHOULD, SHOULD NOT, and MAY are interpreted as in RFC 2119 and RFC 8174.
 
-## 1. Overview
+The pre-freeze draft placed `reply_drop` in the public envelope. The Rust reference implementation encrypted it in `DecryptedPayload`. V1 is frozen around the implemented layout because no independent V1 contract or normative vectors had been published. This one-time correction is recorded in [PROTOCOL-CHANGELOG.md](PROTOCOL-CHANGELOG.md). Future incompatible changes require a new integer wire version under [COMPATIBILITY.md](COMPATIBILITY.md).
 
-Linkdrop is a minimal messaging protocol built around **single-use message drops**.
+## 1. Summary and invariants
 
-A sender does **not** send a message to a global account, phone number, or inbox.  
-Instead, a sender writes exactly one encrypted message to a **single-use drop address** supplied by the recipient.
+A receiver publishes a contact bundle containing a long-term Ed25519 identity key, a long-term X25519 prekey, and random single-use drop references. A sender encrypts one text payload to that prekey and writes a public envelope to one drop. The encrypted payload contains exactly one fresh reply drop.
 
-Each message includes a fresh **reply drop**, allowing the conversation to continue as a chain.
+A conforming implementation MUST preserve these invariants:
 
-### Core properties
+1. A server permits at most one successful `PUT` for a `drop_id`.
+2. Every valid payload contains exactly one `reply_drop`.
+3. A sender generates a fresh cryptographically random reply `drop_id` per message.
+4. Payload bytes are encrypted before upload.
+5. A contact bundle contains at least one initial drop.
+6. Basic server operation requires no account or sender authentication.
+7. An absent optional signature remains interoperable.
 
-- 1:1 messaging only in V1
-- store-and-forward
-- end-to-end encrypted payloads
-- interchangeable, untrusted drop servers
-- no server-side user accounts required
-- no discovery/federation required
-- minimal HTTP API
+V1 has no accounts, discovery, federation protocol, push channel, attachments, groups, or multi-device synchronization.
 
----
+## 2. Encoding and validation
 
-## 2. Design goals
+### 2.1 JSON
 
-### 2.1 Goals
+Protocol objects are UTF-8 JSON. Member order is insignificant except for the signature transcript in Section 5.4. Producers MUST emit the named fields with the shown JSON types. The Rust V1 parser ignores unknown object members; consumers MUST ignore unknown members and MUST NOT give them protocol meaning.
 
-- Extremely simple protocol and deployment model
-- Minimal server responsibilities
-- No server-side contact graph
-- No server-side readable message content
-- Ability to use any compatible drop server
-- Conversation model based on chained reply drops
-- Easy to implement as a small server and CLI/desktop/web client
+### 2.2 Base64url and keys
 
-### 2.2 Non-goals for V1
+Binary values use RFC 4648 base64url without `=` padding.
 
-- Group chat
-- Attachments
-- Multi-device synchronization
-- Push notifications
-- Federation
-- Peer-to-peer transport
-- WebRTC
-- Personal node hosting / direct node discovery
-- Strong metadata protection against global adversaries
-- Perfect forward secrecy ratchets beyond basic session derivation
-- Read receipts
+Public keys use `<algorithm>:<base64url>`:
 
----
+- Ed25519: `ed25519:` plus exactly 32 decoded bytes.
+- X25519: `x25519:` plus exactly 32 decoded bytes.
 
-## 3. Terminology
+### 2.3 Server URLs
 
-### Identity key
-Long-term public/private signing identity of a user.
+A server is an absolute URL with a host. Production values MUST use `https://`. For local development only, implementations MAY accept HTTP for `localhost`, an IPv4 loopback address, or an IPv6 loopback address.
 
-### Prekey
-Public key used by others to establish encrypted messages to that user.
+A path prefix is permitted. Clients append a trailing slash to the base path when absent and resolve `drop/{drop_id}` beneath it. Query and fragment components have no V1 role and SHOULD NOT be generated.
 
-### Drop server
-An HTTPS service that stores a blob at a random single-use drop identifier.
+### 2.4 Identifiers and timestamps
 
-### Drop
-A write-once addressable storage slot on a drop server.
+- A `drop_id` MUST decode to at least 16 random bytes and SHOULD decode to 32 random bytes.
+- A `msg_id` MUST be non-empty base64url. Reference clients generate 16 random bytes.
+- `created_at` is a signed JSON integer containing Unix seconds. V1 prescribes no freshness window.
+- A present `prev_msg_id` MUST be non-empty base64url.
 
-### Initial drop
-A drop included in a contact bundle to allow starting a conversation.
+## 3. Wire objects
 
-### Reply drop
-A newly generated drop included in each outgoing message. The recipient uses it for the next reply.
-
-### Contact bundle
-A portable object shared directly between users containing identity and one or more initial drops.
-
-### Message envelope
-The top-level JSON object uploaded to a drop server.
-
-### Payload
-The encrypted message content inside the envelope.
-
----
-
-## 4. High-level protocol model
-
-A conversation starts when:
-
-1. User B creates one or more initial drops.
-2. User B packages these drops with identity metadata in a contact bundle.
-3. User B shares the contact bundle out-of-band with User A.
-4. User A encrypts a message to User B and uploads it to one initial drop.
-5. User A includes a fresh reply drop in the envelope.
-6. User B retrieves and decrypts the message.
-7. User B replies by uploading to A's reply drop, including a new reply drop of B's own.
-8. The conversation continues as a chain.
-
-### Key idea
-
-Each message consumes exactly one drop and produces exactly one new reply drop.
-
----
-
-## 5. Protocol invariants
-
-These are mandatory V1 invariants.
-
-1. A drop server MUST permit at most one successful write to a given `drop_id`.
-2. A message envelope MUST include exactly one `reply_drop`.
-3. A client MUST generate a fresh `reply_drop` for every outgoing message.
-4. A drop server MUST NOT require user accounts for basic operation.
-5. Message content MUST be encrypted before upload.
-6. Drop identifiers MUST be cryptographically random and unguessable.
-7. A contact bundle MUST contain at least one initial drop.
-
----
-
-## 6. Trust and threat model
-
-### 6.1 What is trusted
-
-- The local client and local secret keys
-- Cryptographic algorithms
-- Out-of-band exchange of contact bundles
-
-### 6.2 What is not trusted
-
-- Drop servers
-- Network intermediaries
-- Other public infrastructure
-
-### 6.3 What V1 protects
-
-- Message content confidentiality from servers
-- Message payload integrity
-- Resistance to trivial unsolicited writes via unguessable drop IDs
-
-### 6.4 What V1 does not fully protect
-
-- Traffic analysis
-- Timing metadata
-- Global network observers
-- Malicious servers dropping messages
-- Correlation between users based on external observations
-
----
-
-## 7. Data model
-
-All protocol objects are JSON encoded as UTF-8.
-
-### 7.1 DropRef
-
-A reference to a single-use drop.
+### 3.1 DropRef
 
 ```json
 {
-  "server": "https://drop.example.org",
-  "drop_id": "base64url-random"
+  "server": "https://drop.example",
+  "drop_id": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8"
 }
 ```
 
-#### Fields
+Both fields are required and follow Section 2.
 
-- `server`: HTTPS origin or base URL of the drop server
-- `drop_id`: random opaque identifier
-
-#### Rules
-
-- `server` MUST use `https://`
-- `drop_id` MUST be base64url without padding
-- `drop_id` MUST encode at least 16 random bytes
-- `drop_id` SHOULD encode 32 random bytes
-
----
-
-### 7.2 ContactBundle
-
-Portable bundle shared directly between users.
+### 3.2 ContactBundle
 
 ```json
 {
   "v": 1,
   "display_name": "Bob",
-  "identity_key": "ed25519:BASE64URL...",
-  "prekey": "x25519:BASE64URL...",
+  "identity_key": "ed25519:F0VTtFbd38aQjsqxwQH-arIeK6oGF3lbfUOmNIKZP9U",
+  "prekey": "x25519:NYBy1jZYgNGu6jKa35EhODhR7SGijjt16WXQ0s0WYlQ",
   "initial_drops": [
     {
-      "server": "https://drop1.example.org",
-      "drop_id": "..."
-    },
-    {
-      "server": "https://drop2.example.org",
-      "drop_id": "..."
+      "server": "https://drop.example",
+      "drop_id": "gIGCg4SFhoeIiYqLjI2Oj5CRkpOUlZaXmJmam5ydnp8"
     }
   ]
 }
 ```
 
-#### Fields
+- `v`: required integer equal to `1`.
+- `display_name`: optional string with no authentication semantics.
+- `identity_key`: required tagged Ed25519 public key.
+- `prekey`: required tagged X25519 public key.
+- `initial_drops`: required non-empty array of valid `DropRef` values.
 
-- `v`: protocol version, integer
-- `display_name`: optional human-readable name
-- `identity_key`: public identity key
-- `prekey`: public encryption prekey
-- `initial_drops`: array of `DropRef`
+The bundle is exchanged out of band. V1 defines no transport, fingerprint UI, or trust decision for that exchange.
 
-#### Rules
+### 3.3 DecryptedPayload
 
-- `v` MUST be `1`
-- `identity_key` MUST use the format `ed25519:<base64url>`
-- `prekey` MUST use the format `x25519:<base64url>`
-- `initial_drops` MUST contain at least 1 entry
-- Clients SHOULD generate 1 to 3 initial drops per contact bundle in V1
-
----
-
-### 7.3 MessageEnvelope
-
-Top-level object stored on a drop server.
-
-```json
-{
-  "v": 1,
-  "msg_id": "base64url-random",
-  "created_at": 1777000100,
-  "reply_drop": {
-    "server": "https://drop.example.org",
-    "drop_id": "..."
-  },
-  "sender_identity_key": "ed25519:BASE64URL...",
-  "sender_ephemeral_key": "x25519:BASE64URL...",
-  "ciphertext": "BASE64URL...",
-  "nonce": "BASE64URL..."
-}
-```
-
-#### Fields
-
-- `v`: protocol version
-- `msg_id`: unique message identifier
-- `created_at`: UNIX timestamp in seconds
-- `reply_drop`: `DropRef` for the next reply
-- `sender_identity_key`: sender's public identity key
-- `sender_ephemeral_key`: sender's ephemeral X25519 public key
-- `ciphertext`: AEAD-encrypted payload bytes, base64url encoded
-- `nonce`: AEAD nonce, base64url encoded
-
-#### Rules
-
-- `v` MUST be `1`
-- `msg_id` MUST be unique per client
-- `reply_drop` MUST be present
-- `sender_identity_key` MUST match `ed25519:<base64url>`
-- `sender_ephemeral_key` MUST match `x25519:<base64url>`
-- `ciphertext` MUST be non-empty
-- `nonce` MUST be the correct size for the chosen AEAD
-
----
-
-### 7.4 Decrypted payload
-
-The decrypted JSON stored inside `ciphertext`.
+These UTF-8 JSON bytes are the AEAD plaintext:
 
 ```json
 {
   "text": "Hello",
-  "prev_msg_id": "optional"
-}
-```
-
-#### Fields
-
-- `text`: message text, UTF-8
-- `prev_msg_id`: optional previous message reference
-
-#### Rules
-
-- `text` MUST be a UTF-8 string
-- V1 payload MUST contain only text
-- V1 clients MAY omit `prev_msg_id`
-- V1 clients SHOULD include `prev_msg_id` when replying if known
-
----
-
-## 8. Encoding rules
-
-### 8.1 JSON
-All JSON MUST be UTF-8.
-
-### 8.2 Base64url
-All binary data in JSON MUST be encoded as base64url without padding.
-
-### 8.3 URLs
-All server URLs MUST be HTTPS URLs.
-
-### 8.4 Timestamps
-Timestamps use UNIX seconds since epoch.
-
----
-
-## 9. Cryptography
-
-V1 intentionally keeps cryptography simple.
-
-### 9.1 Required primitives
-
-Recommended choices:
-
-- Identity keys: Ed25519
-- Encryption prekeys: X25519
-- Message encryption: ChaCha20-Poly1305 or AES-256-GCM
-- KDF: HKDF-SHA256
-- Randomness: cryptographically secure RNG
-
-### 9.2 Key types
-
-Each user has:
-
-- one long-term Ed25519 identity keypair
-- one long-term X25519 prekey keypair
-
-Each outgoing message also generates:
-
-- one fresh X25519 ephemeral keypair
-
-### 9.3 Basic key agreement
-
-For V1, derive a shared secret using:
-
-- sender ephemeral private key
-- recipient prekey public key
-
-Then derive a symmetric encryption key with HKDF.
-
-#### Suggested derivation inputs
-
-- DH result: `X25519(sender_ephemeral_secret, recipient_prekey_public)`
-- HKDF salt: optional fixed or protocol-specific value
-- HKDF info: `"linkdrop-v1-message"`
-
-### 9.4 Encryption model
-
-The sender encrypts the JSON payload with the derived symmetric key using AEAD.
-
-The `reply_drop` remains outside the ciphertext in V1 for protocol simplicity, but is still protected by transport and envelope integrity assumptions only.  
-A future version may move `reply_drop` inside the ciphertext.
-
-### 9.5 Signature requirements
-
-V1 does **not** require per-message signatures.  
-The server is untrusted, but message authenticity is loosely tied to possession of the correct decryption relation.
-
-If desired, implementations MAY add optional detached signatures later, but they are out of scope for V1 interoperability.
-
----
-
-## 10. Drop server API
-
-A compliant drop server exposes the following endpoints:
-
-- `PUT /drop/{drop_id}`
-- `GET /drop/{drop_id}`
-- `HEAD /drop/{drop_id}`
-
-The `{drop_id}` path segment is opaque to the server.
-
-### 10.1 PUT /drop/{drop_id}
-
-Store a message envelope at a single-use drop.
-
-#### Request
-
-- Method: `PUT`
-- Path: `/drop/{drop_id}`
-- Content-Type: `application/json`
-- Body: `MessageEnvelope`
-
-#### Server behavior
-
-- If `drop_id` is unused:
-  - validate basic JSON structure
-  - store the exact request body
-  - mark the drop as used
-  - return `201 Created`
-- If `drop_id` is already used:
-  - return `409 Conflict`
-- If body is too large:
-  - return `413 Payload Too Large`
-- If JSON is invalid:
-  - return `400 Bad Request`
-
-#### Notes
-
-- The server MUST NOT permit overwriting an existing drop
-- The server MUST treat a drop as single-use regardless of sender identity
-- The server SHOULD store the exact original bytes or a normalized equivalent preserving all fields
-
----
-
-### 10.2 GET /drop/{drop_id}
-
-Retrieve the message envelope if present.
-
-#### Request
-
-- Method: `GET`
-- Path: `/drop/{drop_id}`
-
-#### Responses
-
-- `200 OK` with JSON body if a message is present
-- `404 Not Found` if no message is present
-
-#### Notes
-
-- V1 does not require automatic deletion on read
-- V1 clients should be prepared for repeated successful reads until TTL cleanup
-- A future version may add read-once semantics, but not V1
-
----
-
-### 10.3 HEAD /drop/{drop_id}
-
-Check whether a message exists for a drop.
-
-#### Request
-
-- Method: `HEAD`
-- Path: `/drop/{drop_id}`
-
-#### Responses
-
-- `200 OK` if present
-- `404 Not Found` if absent
-
----
-
-## 11. Drop server storage rules
-
-A compliant server MUST:
-
-- store at most one envelope per `drop_id`
-- never overwrite an existing stored envelope
-- support HTTPS
-- not require authentication for basic V1 operation
-
-A server SHOULD:
-
-- enforce a maximum request body size
-- implement TTL cleanup for old drops
-- implement rate limiting
-- support CORS if a browser client is expected
-
-### Recommended operational defaults
-
-- Maximum stored envelope size: 16 KiB
-- Drop TTL: 7 days
-- Rate limiting: implementation-defined
-
----
-
-## 12. Client behavior
-
-A compliant client MUST:
-
-- generate identity keys
-- generate encryption prekeys
-- create contact bundles
-- import contact bundles
-- generate random drop IDs
-- create fresh reply drops for each outgoing message
-- encrypt and decrypt message payloads
-- upload envelopes to drop servers
-- poll or fetch pending drops
-- maintain local message history
-
-A client SHOULD:
-
-- track message IDs to prevent duplicates
-- track consumed drops locally
-- include `prev_msg_id` when replying
-- allow users to configure preferred drop servers
-- generate multiple initial drops in a contact bundle
-
----
-
-## 13. Client local state
-
-The implementation SHOULD maintain local state containing at least:
-
-### 13.1 Identity
-
-- Ed25519 secret key
-- Ed25519 public key
-- X25519 prekey secret key
-- X25519 prekey public key
-
-### 13.2 Contacts
-
-For each contact:
-
-- display name
-- identity public key
-- prekey public key
-- unused known initial drops or next incoming drops if tracked
-- conversation history
-
-### 13.3 Messages
-
-For each message:
-
-- message ID
-- sender/recipient contact reference
-- drop used for send
-- reply drop generated
-- local state: pending/sent/failed
-- decrypted text
-- timestamp
-
----
-
-## 14. Contact exchange
-
-Contact bundles are exchanged out-of-band.
-
-Examples:
-
-- QR code
-- copy/paste
-- file
-- local share sheet
-- direct text transport
-- manual import/export
-
-### V1 assumption
-
-The protocol assumes the contact bundle reaches the peer through some trusted or acceptable external channel.  
-V1 does not define that exchange channel.
-
----
-
-## 15. Message flows
-
-### 15.1 Conversation start
-
-1. Bob creates one or more initial drops on chosen drop servers.
-2. Bob exports a `ContactBundle`.
-3. Alice imports Bob's bundle.
-4. Alice generates a fresh reply drop for herself.
-5. Alice constructs and encrypts a `MessageEnvelope`.
-6. Alice uploads the envelope to one of Bob's initial drops.
-7. Bob later polls or fetches the relevant drop and decrypts the message.
-
----
-
-### 15.2 Reply flow
-
-1. Bob reads Alice's message.
-2. Bob extracts Alice's `reply_drop`.
-3. Bob generates a new reply drop for himself.
-4. Bob encrypts a reply payload.
-5. Bob uploads the envelope to Alice's reply drop.
-6. Alice later fetches and decrypts it.
-
----
-
-### 15.3 Ongoing chain
-
-Every reply repeats the same pattern:
-
-- consume received `reply_drop`
-- generate fresh new `reply_drop`
-- encrypt payload
-- upload to recipient's last `reply_drop`
-
----
-
-## 16. Polling model
-
-V1 uses client polling, not push.
-
-A client MAY poll:
-
-- on app start
-- on manual refresh
-- periodically, e.g. every 10 to 30 seconds
-
-### Recommended V1 behavior
-
-- Desktop CLI/manual mode: explicit command invocation is acceptable
-- Desktop/mobile GUI: periodic polling is acceptable
-- Browser clients: periodic polling is acceptable if CORS is supported
-
----
-
-## 17. Error handling
-
-### 17.1 HTTP-layer errors
-
-#### `201 Created`
-Upload succeeded.
-
-#### `400 Bad Request`
-Malformed JSON or invalid envelope shape.
-
-#### `404 Not Found`
-No message exists for the requested drop.
-
-#### `409 Conflict`
-The drop has already been used.
-
-#### `413 Payload Too Large`
-Envelope exceeds server maximum size.
-
-#### `5xx`
-Server error. Client may retry according to policy.
-
----
-
-### 17.2 Client-side states
-
-Each outbound message SHOULD be tracked as one of:
-
-- `pending`
-- `sent`
-- `failed`
-
-Optional extra state:
-
-- `delivered_to_drop`
-
-In V1, `PUT` success means only that the envelope was stored, not that the recipient read it.
-
----
-
-### 17.3 Duplicate handling
-
-Clients SHOULD store seen `msg_id` values and ignore duplicates.
-
-Recommended rule:
-
-- if `msg_id` has already been processed for a conversation, do not reinsert it into history
-
----
-
-### 17.4 Decryption failures
-
-If decryption fails, the client SHOULD:
-
-- mark the envelope as invalid/unreadable
-- avoid crashing
-- allow diagnostic logging
-- not assume sender authenticity
-
----
-
-## 18. Security considerations
-
-### 18.1 Drop ID entropy
-
-Drop IDs are the primary capability in V1.  
-They MUST be generated using a cryptographically secure RNG.
-
-Recommended size:
-
-- 32 random bytes, base64url-encoded
-
-### 18.2 Server abuse
-
-Open drop servers can be abused.  
-Servers SHOULD consider:
-
-- request size limits
-- IP rate limits
-- TTL cleanup
-- abuse detection
-
-### 18.3 Metadata leakage
-
-Servers can observe:
-
-- source IP address of uploaders
-- target drop IDs
-- upload time
-- approximate message size
-- read/poll timing
-
-V1 does not solve this.
-
-### 18.4 Malicious servers
-
-Servers may:
-
-- drop messages
-- refuse writes
-- refuse reads
-- delay requests
-- log metadata
-
-Clients should not trust server availability.
-
-### 18.5 Authenticity limitations
-
-V1 provides encrypted communication but does not define strong signature-based sender authentication inside each message.  
-Identity binding relies partly on the contact bundle and correct decryption relationship.
-
-A future version may add signed envelopes.
-
----
-
-## 19. Interoperability requirements
-
-Two implementations are interoperable if they agree on:
-
-1. JSON schema described in this spec
-2. base64url encoding rules
-3. HTTP endpoint semantics
-4. chosen cryptographic suite
-
-### Mandatory shared suite for V1 interoperability
-
-To keep implementations compatible, Codex SHOULD implement this exact suite first:
-
-- Ed25519 for identity keys
-- X25519 for prekeys and ephemeral keys
-- HKDF-SHA256 for key derivation
-- ChaCha20-Poly1305 for payload encryption
-
----
-
-## 20. Recommended file formats for local storage
-
-This section is non-normative but recommended.
-
-### 20.1 Identity file
-
-```json
-{
-  "v": 1,
-  "display_name": "Alice",
-  "identity_secret_key": "BASE64URL...",
-  "identity_public_key": "BASE64URL...",
-  "prekey_secret_key": "BASE64URL...",
-  "prekey_public_key": "BASE64URL..."
-}
-```
-
-### 20.2 Contacts file
-
-```json
-{
-  "v": 1,
-  "contacts": [
-    {
-      "contact_id": "base64url-random",
-      "display_name": "Bob",
-      "identity_key": "ed25519:BASE64URL...",
-      "prekey": "x25519:BASE64URL...",
-      "initial_drops": [
-        {
-          "server": "https://drop1.example.org",
-          "drop_id": "..."
-        }
-      ]
-    }
-  ]
-}
-```
-
-### 20.3 Messages file
-
-```json
-{
-  "v": 1,
-  "messages": [
-    {
-      "msg_id": "....",
-      "contact_id": "....",
-      "direction": "outbound",
-      "created_at": 1777000100,
-      "text": "Hello",
-      "status": "sent",
-      "used_drop": {
-        "server": "https://drop1.example.org",
-        "drop_id": "..."
-      },
-      "reply_drop_generated": {
-        "server": "https://drop2.example.org",
-        "drop_id": "..."
-      }
-    }
-  ]
-}
-```
-
----
-
-## 21. Recommended implementation split
-
-This section is intended for Codex.
-
-### 21.1 Server responsibilities
-
-The server should:
-
-- implement a very small HTTPS or HTTP API
-- store JSON blobs by `drop_id`
-- reject overwrites
-- support `PUT`, `GET`, `HEAD`
-- use SQLite or flat-file/KV storage
-- optionally support TTL cleanup on startup or periodic sweep
-
-### 21.2 Client responsibilities
-
-The client should:
-
-- manage local keys
-- manage local contacts
-- create/import/export contact bundles
-- create random drops on configured servers
-- send encrypted messages
-- fetch and decrypt messages
-- store message history locally
-
----
-
-## 22. Suggested CLI commands for a reference client
-
-This section is non-normative but recommended for the first implementation.
-
-### Identity management
-
-- `linkdrop init --name "Alice"`
-- `linkdrop whoami`
-
-### Contact management
-
-- `linkdrop contact export --server https://drop1.example.org --server https://drop2.example.org`
-- `linkdrop contact import <bundle-file>`
-- `linkdrop contacts list`
-
-### Messaging
-
-- `linkdrop send --to <contact-id> --text "hello"`
-- `linkdrop poll`
-- `linkdrop inbox`
-- `linkdrop history --contact <contact-id>`
-
----
-
-## 23. Suggested server storage schema
-
-### SQLite example
-
-```sql
-CREATE TABLE drops (
-    drop_id TEXT PRIMARY KEY,
-    body BLOB NOT NULL,
-    created_at INTEGER NOT NULL
-);
-
-CREATE INDEX idx_drops_created_at ON drops(created_at);
-```
-
-### Storage rules
-
-- `drop_id` is unique
-- insert fails if already present
-- `body` stores the raw JSON request body
-- TTL cleanup deletes rows older than configured threshold
-
----
-
-## 24. Minimal compliance test cases
-
-Codex should implement at least these tests.
-
-### 24.1 Server tests
-
-1. `PUT` to unused drop returns `201`
-2. second `PUT` to same drop returns `409`
-3. `GET` to used drop returns stored body
-4. `GET` to unused drop returns `404`
-5. `HEAD` to used drop returns `200`
-6. `HEAD` to unused drop returns `404`
-
-### 24.2 Client tests
-
-1. identity generation succeeds
-2. contact bundle export/import round-trips
-3. message encryption/decryption round-trips
-4. fresh reply drop is generated for each outbound message
-5. duplicate `msg_id` is ignored
-6. send to valid initial drop succeeds end-to-end using a local server
-
----
-
-## 25. Example objects
-
-### 25.1 Contact bundle example
-
-```json
-{
-  "v": 1,
-  "display_name": "Bob",
-  "identity_key": "ed25519:MCowBQYDK2VwAyEAexample",
-  "prekey": "x25519:MCowBQYDK2VuAyEAexample",
-  "initial_drops": [
-    {
-      "server": "https://drop1.example.org",
-      "drop_id": "m0z7M7U4dP7v8a5i4mM5Lw"
-    }
-  ]
-}
-```
-
-### 25.2 Envelope example
-
-```json
-{
-  "v": 1,
-  "msg_id": "fQ9lX4rY9B2o0nN8",
-  "created_at": 1777000100,
   "reply_drop": {
-    "server": "https://drop2.example.org",
-    "drop_id": "qB1r8P3nZ6cW2sK9"
+    "server": "https://reply.example",
+    "drop_id": "oKGio6SlpqeoqaqrrK2ur7CxsrO0tba3uLm6u7y9vr8"
   },
-  "sender_identity_key": "ed25519:MCowBQYDK2VwAyEAalice",
-  "sender_ephemeral_key": "x25519:MCowBQYDK2VuAyEAephemeral",
-  "ciphertext": "BASE64URL_CIPHERTEXT",
-  "nonce": "BASE64URL_NONCE"
+  "prev_msg_id": "kJGSk5SVlpeYmZqbnJ2enw"
 }
 ```
 
-### 25.3 Payload example
+- `text`: required non-empty UTF-8 string.
+- `reply_drop`: required valid `DropRef`.
+- `prev_msg_id`: optional non-empty base64url string.
+
+The reply drop MUST NOT appear as a top-level V1 envelope member. Payload member order and insignificant whitespace may vary; encryption operates on the exact serialized bytes.
+
+### 3.4 MessageEnvelope
+
+The public object uploaded to a server is:
 
 ```json
 {
-  "text": "Hej",
-  "prev_msg_id": "optional"
+  "v": 1,
+  "msg_id": "cHFyc3R1dnd4eXp7fH1-fw",
+  "created_at": 1777000100,
+  "sender_identity_key": "ed25519:A6EHv_POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg",
+  "sender_ephemeral_key": "x25519:eaYx7t4b-cmPEgMs3q3Q56B5OY_HhriMyEbsia-FpRo",
+  "ciphertext": "BASE64URL",
+  "nonce": "AAECAwQFBgcICQoL",
+  "signature": "OPTIONAL_BASE64URL"
 }
 ```
 
----
+- `v`: required integer equal to `1`.
+- `msg_id`: required identifier from Section 2.4.
+- `created_at`: required timestamp from Section 2.4.
+- `sender_identity_key`: required tagged Ed25519 public key.
+- `sender_ephemeral_key`: required tagged X25519 public key.
+- `ciphertext`: required non-empty base64url; bytes include the 16-byte Poly1305 tag.
+- `nonce`: required base64url decoding to exactly 12 bytes.
+- `signature`: optional base64url decoding to exactly 64 bytes.
 
-## 26. Implementation requirements for Codex
+Unsigned producers omit `signature`; they do not emit `null`. Consumers MUST accept absence. If present, the signature MUST verify under Section 5.4 or the message is invalid.
 
-Codex should implement exactly this V1.
+## 4. Message flow
 
-### 26.1 Server
+### 4.1 First message
 
-Implement a Rust drop server with:
+1. Bob generates long-term Ed25519 and X25519 prekey keypairs.
+2. Bob generates initial drops, watches them, and shares a `ContactBundle`.
+3. Alice imports it, consumes one initial drop locally, and generates a fresh reply drop.
+4. Alice encrypts the payload to Bob's prekey and uploads the envelope.
+5. Bob downloads, validates, optionally verifies, and decrypts it.
+6. Bob stores the encrypted `reply_drop` as the next outgoing drop.
 
-- `PUT /drop/{drop_id}`
-- `GET /drop/{drop_id}`
-- `HEAD /drop/{drop_id}`
-- SQLite backend
-- max body size config
-- TTL cleanup
-- no auth
-- JSON body passthrough
+### 4.2 V1 reply limitation
 
-### 26.2 Client
+A reply still encrypts to the other peer's long-term X25519 prekey. The encrypted reply drop contains no encryption key. One bundle can deliver a first message and return drop, but the recipient cannot reply until they also know the sender's prekey. The Rust bidirectional test therefore exchanges both bundles.
 
-Implement a Rust CLI client with:
+This documents frozen V1 behavior. Versioned one-time receive capabilities are deferred to issue #1.
 
-- local identity generation
-- contact bundle export
-- contact bundle import
-- configured list of drop servers
-- send text message to contact
-- poll for messages
-- local JSON or SQLite state store
-- exact crypto suite defined above
+### 4.3 Duplicates
 
-### 26.3 Suggested Rust crates
+Clients SHOULD remember processed `msg_id` values per contact. A duplicate MUST NOT be inserted again or replace the active next outgoing drop.
 
-Non-normative suggestion:
+## 5. Cryptography
 
-- `axum` or `hyper` for server
-- `reqwest` for HTTP client
-- `rusqlite` for SQLite
-- `serde`, `serde_json`
-- `rand`
-- `base64`
-- `ed25519-dalek`
-- `x25519-dalek`
-- `chacha20poly1305`
-- `hkdf`
-- `sha2`
-- `clap`
+V1 has exactly one interoperable suite:
 
----
+| Purpose | Primitive |
+| --- | --- |
+| Long-term identity | Ed25519 |
+| Recipient prekey and sender ephemeral key | X25519 |
+| Key derivation | HKDF-SHA256 |
+| Payload encryption | ChaCha20-Poly1305 |
+| Random values | Cryptographically secure RNG |
 
-## 27. Explicit exclusions for first implementation
+AES-GCM and alternate KDF inputs are not V1 compatible.
 
-To prevent scope creep, Codex should NOT implement in the first pass:
+### 5.1 Key agreement
 
-- groups
-- attachments
-- push
-- WebRTC
-- relay discovery
-- direct node hosting
-- signature framework
-- read receipts
-- multi-device
-- contact syncing
-- server federation
-- automatic key rotation beyond initial setup
+For every message the sender generates a fresh X25519 ephemeral keypair:
 
----
+```text
+shared_secret = X25519(sender_ephemeral_secret, recipient_prekey_public)
+```
 
-## 28. Future extensions
+The receiver uses its long-term prekey secret and the published ephemeral public key. V1 validates the tag and 32-byte length; the reference implementation adds no separate low-order/all-zero rejection rule.
 
-Out of scope for V1, but compatible with the architecture:
+### 5.2 KDF
 
-- reply drop inside ciphertext
-- signed envelopes
-- multiple prekeys / prekey rotation
-- richer payload types
-- attachments via external blob store
-- relay redundancy
-- client-owned nodes
-- WebRTC transport when both peers are online
-- server directory/discovery
-- onion-style routing or metadata-reduction layers
+Derive exactly 32 bytes using HKDF-SHA256:
 
----
+```text
+IKM  = shared_secret
+salt = absent (the RFC 5869 all-zero HashLen default)
+info = UTF-8 bytes of "linkdrop-v1-message"
+L    = 32
+```
 
-## 29. Normative summary
+### 5.3 AEAD
 
-The following statements are normative.
+Serialize the payload to UTF-8 JSON, generate a fresh random 12-byte nonce, and use:
 
-- A drop server MUST allow at most one successful write per `drop_id`.
-- A client MUST generate cryptographically random drop IDs.
-- A message envelope MUST include exactly one `reply_drop`.
-- A client MUST generate a fresh reply drop for every outgoing message.
-- A contact bundle MUST contain at least one initial drop.
-- Message payloads MUST be encrypted before upload.
-- A compliant V1 implementation MUST support the mandatory cryptographic suite defined in Section 19.
-- A drop server MUST support `PUT`, `GET`, and `HEAD` on `/drop/{drop_id}`.
-- A drop server MUST NOT require user accounts for basic V1 operation.
+```text
+key             = Section 5.2 output
+nonce           = 12 random bytes
+plaintext       = exact payload JSON bytes
+associated data = empty
+ciphertext      = encrypted bytes followed by the 16-byte Poly1305 tag
+```
 
----
+Receivers MUST reject authentication failure and validate the plaintext object before advancing state.
 
-## 30. One-sentence protocol summary
+### 5.4 Optional Ed25519 signature
 
-**Linkdrop V1 is a minimal encrypted messaging protocol where users exchange contact bundles containing single-use initial drops, and each message advances the conversation by carrying a fresh reply drop for the next response.**
+The signature is self-contained: it is verified with `sender_identity_key` in the same public envelope. It does not prove equality with a previously expected contact key.
+
+Serialize exactly these seven members in this order, with no whitespace and `signature` omitted:
+
+```json
+{"v":1,"msg_id":"...","created_at":1777000100,"sender_identity_key":"ed25519:...","sender_ephemeral_key":"x25519:...","ciphertext":"...","nonce":"..."}
+```
+
+Use the exact member spelling above, shortest decimal JSON integer forms, normal JSON string escaping, and UTF-8. Sign those bytes with Ed25519 and encode the 64-byte signature as unpadded base64url. Unknown envelope members are not in the transcript, are unauthenticated, and MUST be ignored.
+
+## 6. Security properties and limitations
+
+With correct primitives, secure randomness, uncompromised secrets, and acceptable out-of-band exchange, V1 provides payload confidentiality from servers, payload integrity through AEAD, optional authorship relative to a self-asserted public identity key, and resistance to blind writes through unguessable drop IDs.
+
+V1 does **not** provide:
+
+- forward secrecy after compromise of the recipient's long-term X25519 prekey;
+- sender unlinkability from a server, because `sender_identity_key` is public and stable;
+- traffic-analysis, IP-address, timing, or size privacy;
+- availability against a malicious server;
+- binding to the identity expected for a watched contact;
+- bidirectional bootstrap from only one contact bundle;
+- crash-safe or transactional local state.
+
+Possession of a drop ID is the server-side write capability. HTTPS protects it in transit, but servers can log it. Unsigned messages remain valid V1.
+
+## 7. Drop server API
+
+A server exposes `PUT`, `GET`, and `HEAD` at `drop/{drop_id}` beneath the base URL. The path segment is opaque; clients validate its entropy.
+
+### 7.1 PUT
+
+Request: `Content-Type: application/json`, body `MessageEnvelope`.
+
+- Unused ID and valid envelope: store exact request bytes; `201 Created`.
+- Already used: `409 Conflict`.
+- Malformed JSON or invalid known fields: `400 Bad Request`.
+- Above configured limit: `413 Payload Too Large`.
+- Storage failure: `5xx`.
+
+A server MUST never overwrite a successfully stored drop.
+
+### 7.2 GET and HEAD
+
+GET returns `200 OK` with `application/json` and stored bytes when present, otherwise `404 Not Found`. GET is not destructive; reads may repeat until retention cleanup.
+
+HEAD returns `200 OK` when present and `404 Not Found` otherwise.
+
+Servers SHOULD cap size, expire old drops, and rate-limit abuse. Reference defaults are 16 KiB and seven days. CORS, logging, health checks, and deployment topology are not prescribed.
+
+## 8. Reference-client behavior
+
+The Rust CLI signs by default, accepts unsigned envelopes, permits HTTP only for loopback development, and rotates reply servers. It stores secrets and state in plaintext JSON, writes non-atomically, has no durable outbox, stops on some per-server poll errors, and consumes a watched drop after a fetched invalid or duplicate envelope. These are known hardening gaps, not extra wire requirements.
+
+## 9. Versioning and interoperability
+
+A V1 producer emits `v: 1`; a V1 consumer rejects other versions. Contact-bundle and envelope versions are separate fields but both equal `1`. Local state versions are implementation-specific, not wire versions.
+
+Implementations interoperate when they agree on object validation, Section 5 bytes, optional signature behavior, Section 7 HTTP semantics, and [the normative vectors](test-vectors/v1).
+
+Any incompatible change requires a new integer wire version. See [COMPATIBILITY.md](COMPATIBILITY.md).
+
+## 10. Normative vectors and deferred work
+
+[test-vectors/v1/normative.json](test-vectors/v1/normative.json) freezes a contact bundle, X25519/KDF inputs and output, exact payload bytes, nonce/ciphertext/tag, signature transcript/signature, valid public envelope, and invalid examples. Its private keys and nonce are test-only and MUST NOT be reused.
+
+One-time receive keys, metadata-private envelopes, expected-contact binding, TOFU/fingerprints, crash-safe state, durable retries, server hardening, independent implementations, browser clients, bots, attachments, groups, and push are outside V1 and require versioned follow-up work.
