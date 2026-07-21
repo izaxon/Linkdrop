@@ -1,123 +1,110 @@
 # Linkdrop
 
-> **The best chat protocol — simple, powerful, no lock-in, zero dependencies, AI-bot ready.**
+> A small encrypted messaging protocol with no required provider, account, SDK, or central service.
 
-Linkdrop is a tiny end-to-end encrypted messaging protocol built on **single-use message drops**. There are no accounts, no phone numbers, no federation, no push services, and no SDKs you have to trust. A drop server is a write-once key/value slot behind three HTTP verbs. A client is a small program that knows how to encrypt JSON and chain replies. That's the whole thing.
+Linkdrop is a Rust reference implementation of 1:1 store-and-forward messaging through random, single-use HTTPS drops. The protocol is the product; the Rust workspace proves the frozen V1 wire format can be implemented end to end.
 
-- **Simple** — the entire wire protocol fits in [`linkdrop-v1-spec.md`](linkdrop-v1-spec.md). Three endpoints. One JSON envelope.
-- **No lock-in** — any compatible drop server works. Switch servers per message. Run your own in an afternoon.
-- **AI-bot ready** — no OAuth, no paid API, no SDK. An agent can implement a Linkdrop client from the spec alone.
+- [Frozen V1 specification](linkdrop-v1-spec.md)
+- [Protocol changelog](PROTOCOL-CHANGELOG.md)
+- [Compatibility policy](COMPATIBILITY.md)
+- [Normative V1 vectors](test-vectors/v1)
+- [Phase A boundary audit](docs/protocol-boundary-audit.md)
+- [Vision](MANIFESTO.md)
+- [Agent orientation](AGENTS.md)
 
-> 🤖 **Are you an AI coding agent?** Start with [AGENTS.md](AGENTS.md) and [llms.txt](llms.txt).
-> 📜 **Want the philosophy?** Read the [MANIFESTO](MANIFESTO.md).
-> 🔧 **Want the wire format?** Read the [spec](linkdrop-v1-spec.md).
+## What V1 does
 
----
+A drop server stores one validated encrypted envelope at a random ID and refuses overwrites. It has no user accounts or directory. Clients exchange contact bundles out of band, encrypt text with X25519 + HKDF-SHA256 + ChaCha20-Poly1305, and carry the next reply drop inside ciphertext.
 
-## Why Linkdrop?
-
-- **Servers are dumb pipes.** A drop server stores a blob at a random ID, exactly once. It cannot read your messages, link your conversations, or hold your identity hostage.
-- **Identity belongs to the user.** An Ed25519 keypair on your device. No registration, no recovery email, no provider.
-- **Every message is its own envelope.** Each message is uploaded to a fresh, unguessable, single-use drop and carries the next reply drop inside it. Conversations are chains of capabilities, not entries in a database.
-- **Interchangeable infrastructure.** Pick any drop server per message. Rotate. Mix. The protocol assumes the network is hostile.
-- **Small enough to actually implement.** A working server is a few hundred lines. A working client is a few hundred more. There is nothing to "integrate".
-- **Bots are first-class.** Anything that can speak HTTPS and do X25519 + ChaCha20-Poly1305 is a peer. No human-shaped onboarding required.
-
----
-
-## How it works in 30 seconds
-
-```
-   Alice                    drop server(s)                    Bob
-   -----                    --------------                    ---
-                                                              [creates initial drop D0]
-                            [D0  empty   ]   <-- contact bundle (D0 + Bob's keys) --
-   encrypt msg₁
-   pick fresh D1
-   PUT D0 { ..., reply_drop: D1, ciphertext } -->
-                            [D0  used    ]
-                            [D1  empty   ]                    GET D0 -->  decrypt msg₁
-                                                              extract D1 as next drop
-                                                              encrypt msg₂, pick D2
-                            [D1  used    ] <-- PUT D1 { ..., reply_drop: D2, ciphertext }
-                            [D2  empty   ]
-   GET D1 --> decrypt msg₂
-   extract D2 as next drop
-   ...                       conversation continues as a chain of single-use drops
+```text
+Alice                         drop server                         Bob
+  |                                |                               |
+  |-- PUT D0: public envelope ---->|                               |
+  |   ciphertext decrypts to:      |                               |
+  |   { text, reply_drop: D1 }     |                               |
+  |                                |<-- GET D0 ---------------------|
+  |                                |                               |
+  |<-- GET D1 ---------------------|<-- PUT D1: next envelope ------|
 ```
 
-1. Bob generates one or more **initial drops** and shares a **contact bundle** (his keys + drop refs) out-of-band.
-2. Alice encrypts a message, generates a **fresh reply drop**, and `PUT`s the envelope to one of Bob's initial drops.
-3. Bob `GET`s the drop, decrypts the message, and reads Alice's reply drop from inside the payload.
-4. Bob replies to Alice's reply drop, including a fresh reply drop of his own.
-5. Repeat. Each message consumes exactly one drop and produces exactly one new one.
+Each valid message consumes one drop and offers one new reply drop.
 
----
+V1 has an important bootstrap limitation: the reply drop contains no encryption key. Both peers must exchange contact bundles, or otherwise know each other's long-term X25519 prekeys, before they can exchange messages in both directions. One-time encrypted receive capabilities are versioned follow-up work in [issue #1](https://github.com/izaxon/Linkdrop/issues/1).
 
-## Try it in 60 seconds
+## Security boundary
 
-```bash
-# 1. Build & test
-cargo test
+V1 hides payload content and the encrypted reply drop from a drop server. ChaCha20-Poly1305 authenticates the ciphertext. Envelopes may carry an Ed25519 signature; signatures are the CLI default, while unsigned envelopes remain valid V1.
 
-# 2. Start a drop server
-cargo run -p linkdrop-server -- --bind 127.0.0.1:8080 --database linkdrop-server.db
-```
+V1 does not hide everything:
 
-In a second shell:
+- `sender_identity_key` is public and stable, so a server can correlate envelopes using it.
+- Messages target a long-term recipient prekey, so later prekey compromise can decrypt recorded past envelopes.
+- A signature is verified against the key in the same envelope; the current client does not bind it to the identity expected for a watched contact.
+- Servers still observe IP addresses, drop IDs, timing, and approximate sizes.
+- Malicious servers can drop, delay, refuse, or log traffic.
+- Local JSON secrets and message state are not yet encrypted, atomic, or transactional.
 
-```bash
-# 3. Two identities, two state dirs
-cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .alice init --name "Alice"
-cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .bob   init --name "Bob"
+See the specification and audit for the exact claims. The stronger metadata-private V2 roadmap is tracked in issue #1.
 
-# 4. Both use the local drop server
-cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .alice server add --url http://127.0.0.1:8080
-cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .bob   server add --url http://127.0.0.1:8080
-
-# 5. Bob exports a contact bundle, Alice imports it
-cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .bob   contact export
-cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .alice contact import < bob-bundle.json
-
-# 6. Send and poll
-cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .alice send --to <bob-contact-id> --text "hello"
-cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .bob   poll
-cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .bob   inbox
-```
-
-That's a working end-to-end encrypted conversation. No account. No third party. No SDK.
-
----
-
-## Repo map
+## Workspace
 
 | Crate | Purpose |
 | --- | --- |
-| [`crates/linkdrop-protocol`](crates/linkdrop-protocol) | Shared models, validation, key handling, encoding, X25519 + HKDF + ChaCha20-Poly1305 crypto |
-| [`crates/linkdrop-server`](crates/linkdrop-server) | Write-once SQLite-backed drop server with `PUT` / `GET` / `HEAD /drop/{drop_id}` |
-| [`crates/linkdrop-cli`](crates/linkdrop-cli) | `linkdrop` CLI: identity, contact bundles, preferred-server rotation, send, poll, inbox, history |
+| [`linkdrop-protocol`](crates/linkdrop-protocol) | Wire models, validation, encoding, keys, and crypto; no I/O |
+| [`linkdrop-server`](crates/linkdrop-server) | Axum + SQLite `PUT` / `GET` / `HEAD /drop/{drop_id}` server |
+| [`linkdrop-cli`](crates/linkdrop-cli) | Identity, contacts, preferred servers, send, poll, inbox, and history |
 
-Reference implementation in Rust. The wire protocol is language-agnostic — see the [spec](linkdrop-v1-spec.md).
+The workspace uses Rust 2024.
 
----
+## Build and validate
 
-## Current implementation notes
+```bash
+cargo fmt --all -- --check
+cargo clippy --all-targets --all-features -- -D warnings
+cargo test --all --locked
+cargo audit
+```
 
-- Payloads are encrypted with **X25519 + HKDF-SHA256 + ChaCha20-Poly1305**.
-- The next `reply_drop` is carried **inside the encrypted payload**, not as top-level envelope metadata.
-- Envelopes may carry an **optional Ed25519 signature**. Signed is the CLI default; `--unsigned` exists for interop testing.
-- The CLI can maintain a **preferred server list** and rotate fresh reply drops across those servers.
-- HTTPS is required by the spec; HTTP is allowed only for `localhost` development.
+Tests use in-process local servers and temporary state directories; they do not use the public internet.
 
----
+## Local demonstration
 
-## Get involved
+Start a development server:
 
-The protocol wins when there are many independent implementations and many public drop servers. You can help by:
+```bash
+cargo run -p linkdrop-server -- --bind 127.0.0.1:8080 --database linkdrop-server.db
+```
 
-- **Implementing a client** in your favourite language — JS, Python, Go, Swift, anything. The spec is short.
-- **Running a public drop server** — write-once storage with a TTL is genuinely a weekend project.
-- **Building a bot** — Linkdrop is designed so an LLM agent is just another peer.
-- **Filing issues / PRs** — clarifications to the spec, missing test vectors, ergonomic fixes.
+Create two clients and configure the loopback server:
 
-Read the [MANIFESTO](MANIFESTO.md) for what we're trying to win, and [AGENTS.md](AGENTS.md) if you're (or you're driving) an AI coding assistant.
+```bash
+cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .alice init --name Alice
+cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .bob init --name Bob
+cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .alice server add --url http://127.0.0.1:8080
+cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .bob server add --url http://127.0.0.1:8080
+```
+
+Export and import **both** bundles for bidirectional V1 messaging:
+
+```bash
+cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .alice contact export > alice-bundle.json
+cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .bob contact export > bob-bundle.json
+cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .alice contact import bob-bundle.json
+cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .bob contact import alice-bundle.json
+```
+
+Then send, poll, and inspect:
+
+```bash
+cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .alice send --to <bob-contact-id> --text "hello"
+cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .bob poll
+cargo run -p linkdrop-cli --bin linkdrop -- --state-dir .bob inbox
+```
+
+Production `DropRef.server` values require HTTPS. HTTP is accepted only for loopback development.
+
+## Implementing another client
+
+Start from the frozen spec, then run the JSON vectors in [test-vectors/v1](test-vectors/v1). A compatible implementation must reproduce the exact X25519 shared secret, HKDF output, ciphertext/tag, signature transcript, and signature, and must reject the invalid cases.
+
+Do not infer wire behavior from README examples alone. If code, documentation, and vectors ever disagree, stop and open an issue: frozen wire meaning cannot be changed silently.
