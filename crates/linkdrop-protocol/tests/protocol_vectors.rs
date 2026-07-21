@@ -31,10 +31,8 @@ fn valid_contact_bundle_and_payload_match_v1_models() {
         serde_json::from_value(vectors["contact_bundle"]["json"].clone()).unwrap();
     contact.validate(false).unwrap();
 
-    let payload: DecryptedPayload = serde_json::from_value(
-        vectors["encrypted_message"]["payload"]["json"].clone(),
-    )
-    .unwrap();
+    let payload: DecryptedPayload =
+        serde_json::from_value(vectors["encrypted_message"]["payload"]["json"].clone()).unwrap();
     payload.validate(false).unwrap();
 
     let serialized = serde_json::to_string(&payload).unwrap();
@@ -140,17 +138,14 @@ fn signature_transcript_and_decryption_match_normative_bytes() {
             .as_bytes()
     );
 
-    let public_bytes =
-        parse_tagged_base64(&envelope.sender_identity_key, "ed25519").unwrap();
+    let public_bytes = parse_tagged_base64(&envelope.sender_identity_key, "ed25519").unwrap();
     let verifying_key = VerifyingKey::from_bytes(
         &<[u8; 32]>::try_from(public_bytes).expect("identity key must contain 32 bytes"),
     )
     .unwrap();
     let signature = Signature::from_bytes(
-        &<[u8; 64]>::try_from(
-            decode_base64url(message["signature"].as_str().unwrap()).unwrap(),
-        )
-        .expect("signature must contain 64 bytes"),
+        &<[u8; 64]>::try_from(decode_base64url(message["signature"].as_str().unwrap()).unwrap())
+            .expect("signature must contain 64 bytes"),
     );
     verifying_key.verify(&transcript, &signature).unwrap();
 
@@ -185,10 +180,7 @@ fn invalid_model_examples_are_rejected() {
         );
     }
 
-    for case in vectors["invalid"]["public_envelopes"]
-        .as_array()
-        .unwrap()
-    {
+    for case in vectors["invalid"]["public_envelopes"].as_array().unwrap() {
         let value: MessageEnvelope = serde_json::from_value(case["value"].clone()).unwrap();
         assert!(
             value.validate(false).is_err(),
