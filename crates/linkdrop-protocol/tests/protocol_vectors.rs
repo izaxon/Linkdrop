@@ -1,4 +1,7 @@
-use chacha20poly1305::{\n    ChaCha20Poly1305, KeyInit,\n    aead::{Aead, generic_array::GenericArray},\n};
+use chacha20poly1305::{
+    ChaCha20Poly1305, KeyInit,
+    aead::{Aead, generic_array::GenericArray},
+};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use hkdf::Hkdf;
 use linkdrop_protocol::{
