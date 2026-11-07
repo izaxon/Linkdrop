@@ -8,7 +8,8 @@ This file follows the [llms.txt](https://llmstxt.org) convention and is intended
 
 - [README.md](README.md): Project overview, "why Linkdrop", 30-second flow diagram, 60-second quick start.
 - [MANIFESTO.md](MANIFESTO.md): Philosophy, beliefs, what the project rejects, winning conditions, call to action.
-- [linkdrop-v1-spec.md](linkdrop-v1-spec.md): Normative wire protocol — JSON shapes, HTTP endpoints, crypto suite, invariants. Source of truth.
+- [linkdrop-v1-spec.md](linkdrop-v1-spec.md): Normative wire protocol — JSON shapes, HTTP endpoints, crypto suite, invariants. Source of truth for `v: 1`.
+- [linkdrop-v2-spec.md](linkdrop-v2-spec.md): Draft `v: 2` — derived drop chains, rotation, acks and resends, rescue capabilities, metadata-private envelope, optional long poll. Not frozen.
 - [AGENTS.md](AGENTS.md): Orientation for AI coding assistants — workspace map, canonical commands, conventions, what not to do.
 
 ## Reference implementation (Rust)

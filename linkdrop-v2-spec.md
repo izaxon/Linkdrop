@@ -192,13 +192,13 @@ The receiver of a direction knows `next_seq`, the lowest sequence number it has 
 
 The receiver processes drops in increasing `n`. When it processes `n`, it sets `next_seq = n + 1` and the window slides. A receiver SHOULD keep polling in the same pass until a full window is empty, so a long run of consecutive messages is drained in one session.
 
-A drop that returns `404` while a higher `n` of the same profile is present was lost (expired or discarded). The receiver records `n` as missing (§6.2) and continues; decryption of later messages never depends on an earlier one.
+A drop that returns `404` on every live generation while a higher `n` is present on any of them was lost (expired or discarded). The receiver records `n` as missing (§6.2) and continues; decryption of later messages never depends on an earlier one. A drop that holds bytes which do not open as a valid message for that position (squatted, foreign, or corrupt) is treated the same way. A transport or server error is not a `404`: the receiver stops at that `n` until it can tell.
 
 ### 4.4 Rotation (ratchet)
 
 The owner of a direction (its receiver) rotates it by sending a new `ReceiveProfile` with `gen + 1` inside any message it writes in the opposite direction. A sender adopts a profile the first time it writes after processing the message that carried it; it MUST adopt the highest `gen` it has processed and MUST NOT return to an older one.
 
-Because the sender may already have written messages to the old generation before it saw the new profile, the receiver watches both the previous and the new generation until a message arrives on the new one. Once a message with sequence number `t` has been read on generation `g`, every message with sequence number greater than `t` is on generation `g` or later, so the receiver finishes `n < t` on generation `g - 1`, then deletes generation `g - 1`, including its receive secret and chain key.
+Because the sender may already have written messages to the old generation before it saw the new profile, the receiver watches both the previous and the new generation until a message arrives on the new one. Once a message with sequence number `t` has been read on generation `g`, every message with sequence number greater than `t` is on generation `g` or later. Since the receiver processes in sequence order, every `n < t` has by then been processed or recorded missing, so it deletes generation `g - 1`, including its receive secret and chain key, as soon as it processes `t`.
 
 A receiver MUST NOT advertise a further generation while an advertised one is still unadopted; it repeats the unadopted profile instead. At most two generations per direction are therefore ever live, and the receiver's trial work is bounded.
 
@@ -390,7 +390,7 @@ Possession of a `DropCapability` or a `ReceiveProfile` is a write capability; HT
 
 ## 10. Reference-client behavior
 
-The Rust CLI keeps V1 state files untouched and stores V2 conversations in `conversations.json`. It uses a window of 8, rotates its receive profile and advertises a rescue in every message it writes, resends on `missing` and on observed expiry, deduplicates on `msg_id`, and uses the long-poll extension opportunistically. State is plaintext JSON written non-atomically; these are hardening gaps, not wire requirements.
+The Rust CLI (`linkdrop v2 ...`) keeps V1 state files untouched and stores V2 conversations in `conversations.json`. It reuses the V1 Ed25519 identity, uses a window of 8, rotates its receive profile and advertises a rescue in every message it writes, sends a control acknowledgement from `poll` when it finds a gap, resends on `missing` and on observed expiry (at most three times), deduplicates on `msg_id`, resolves `409` by byte comparison, and uses the long-poll extension only when asked (`poll --wait`). State is plaintext JSON written non-atomically and the sender's verification state is never promoted automatically; these are hardening gaps, not wire requirements.
 
 ## 11. Versioning, vectors, and deferred work
 
