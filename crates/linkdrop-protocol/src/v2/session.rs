@@ -189,8 +189,13 @@ impl WatchTarget {
 /// What the caller observed for one watched drop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DropStatus {
+    /// The drop holds a well-formed V2 envelope.
     Present(Envelope),
+    /// The drop holds bytes that are not a V2 envelope (squatted or foreign).
+    Unreadable,
+    /// `404`: never written, expired, or discarded.
     Absent,
+    /// Transport or server error; nothing can be concluded.
     Unknown,
 }
 
@@ -573,11 +578,22 @@ impl Conversation {
                             drop,
                         },
                         DropStatus::Present(envelope),
-                    ) if *s == seq => Some((*generation, drop.clone(), envelope.clone())),
+                    ) if *s == seq => Some((*generation, drop.clone(), Some(envelope.clone()))),
+                    (
+                        WatchTarget::Chain {
+                            seq: s,
+                            generation,
+                            drop,
+                        },
+                        DropStatus::Unreadable,
+                    ) if *s == seq => Some((*generation, drop.clone(), None)),
                     _ => None,
                 });
             if let Some((generation, drop, envelope)) = present {
-                match self.process_chain_message(generation, &drop, &envelope) {
+                let processed = envelope
+                    .ok_or_else(|| ProtocolError::Validation("unreadable drop".to_string()))
+                    .and_then(|envelope| self.process_chain_message(generation, &drop, &envelope));
+                match processed {
                     Ok((incoming, delivered)) => {
                         outcome.delivered_msg_ids.extend(delivered);
                         outcome.received.push(incoming);
@@ -605,7 +621,7 @@ impl Conversation {
             let later_present = results.iter().any(|(target, status)| {
                 matches!(
                     (target, status),
-                    (WatchTarget::Chain { seq: s, .. }, DropStatus::Present(_)) if *s > seq
+                    (WatchTarget::Chain { seq: s, .. }, DropStatus::Present(_) | DropStatus::Unreadable) if *s > seq
                 )
             });
             if !later_present {
