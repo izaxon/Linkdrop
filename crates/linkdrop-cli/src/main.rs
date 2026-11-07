@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use linkdrop_cli::{
     LinkdropApp, format_contacts, format_messages, format_poll_summary, format_servers,
-    format_whoami,
+    format_v2_conversations, format_v2_messages, format_v2_poll_summary, format_whoami,
 };
 
 #[derive(Debug, Parser)]
@@ -48,6 +48,44 @@ enum Command {
     Server {
         #[command(subcommand)]
         command: ServerCommand,
+    },
+    /// Draft wire version 2: asynchronous mailbox (see linkdrop-v2-spec.md).
+    V2 {
+        #[command(subcommand)]
+        command: V2Command,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum V2Command {
+    /// Print a V2 contact bundle with one fresh one-time capability per server.
+    Export {
+        #[arg(long = "server")]
+        servers: Vec<String>,
+    },
+    /// Import a V2 contact bundle; the first `v2 send` opens the chain.
+    Import {
+        bundle_file: PathBuf,
+    },
+    /// List V2 conversations.
+    Contacts,
+    /// Send a text message; consecutive sends never wait for the peer.
+    Send {
+        #[arg(long)]
+        to: String,
+        #[arg(long)]
+        text: String,
+    },
+    /// Poll watched drops, acknowledge, and resend what was lost.
+    Poll {
+        /// Long-poll the lowest watched drop of each generation for this many seconds.
+        #[arg(long)]
+        wait: Option<u64>,
+    },
+    Inbox,
+    History {
+        #[arg(long)]
+        contact: String,
     },
 }
 
@@ -125,6 +163,37 @@ fn main() -> Result<()> {
             }
             ServerCommand::List => {
                 println!("{}", format_servers(&app.list_servers()?));
+            }
+        },
+        Command::V2 { command } => match command {
+            V2Command::Export { servers } => {
+                let bundle = app.v2_export_bundle(&servers)?;
+                println!("{}", serde_json::to_string_pretty(&bundle)?);
+            }
+            V2Command::Import { bundle_file } => {
+                let conversation = app.v2_import_bundle(&bundle_file)?;
+                println!("{}", conversation.contact_id);
+            }
+            V2Command::Contacts => {
+                println!("{}", format_v2_conversations(&app.v2_list_conversations()?));
+            }
+            V2Command::Send { to, text } => {
+                let record = app.v2_send(&to, &text)?;
+                println!("{} seq={}", record.msg_id, record.seq);
+            }
+            V2Command::Poll { wait } => {
+                println!("{}", format_v2_poll_summary(&app.v2_poll(wait)?));
+            }
+            V2Command::Inbox => {
+                let conversations = app.v2_list_conversations()?;
+                println!("{}", format_v2_messages(&app.v2_inbox()?, &conversations));
+            }
+            V2Command::History { contact } => {
+                let conversations = app.v2_list_conversations()?;
+                println!(
+                    "{}",
+                    format_v2_messages(&app.v2_history(&contact)?, &conversations)
+                );
             }
         },
     }

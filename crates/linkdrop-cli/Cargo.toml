@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+ed25519-dalek.workspace = true
 linkdrop-protocol = { path = "../linkdrop-protocol" }
 reqwest.workspace = true
 serde.workspace = true
@@ -15,6 +16,7 @@ url.workspace = true
 [dev-dependencies]
 axum.workspace = true
 linkdrop-server = { path = "../linkdrop-server" }
+rusqlite.workspace = true
 tempfile.workspace = true
 tokio.workspace = true
 

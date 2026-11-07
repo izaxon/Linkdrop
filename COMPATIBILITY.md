@@ -10,6 +10,19 @@ A frozen version is defined by its specification and normative test vectors. For
 
 Frozen versions may receive editorial clarifications, new non-normative examples, additional failure vectors, and security warnings only when they do not change accepted or emitted wire meaning.
 
+## Draft versions
+
+A draft version has an integer `v`, a specification marked `Status: Draft`, and vectors that are the current interoperability target but may change together with the specification. V2 is a draft: [linkdrop-v2-spec.md](linkdrop-v2-spec.md) and [test-vectors/v2](test-vectors/v2).
+
+While a version is a draft:
+
+- its wire bytes MAY change, but every change updates the specification, the vectors, and the changelog in the same change;
+- it MUST NOT alter the meaning, validation, or emitted bytes of any frozen version;
+- a reference implementation MUST select it only by its explicit `v` value and MUST keep frozen-version code paths independent of it;
+- freezing it requires a changelog entry that names the final vector set and a status change in the specification.
+
+Draft V2 shares no wire objects with V1. V1 `ContactBundle`, `DropRef`, `MessageEnvelope`, and `DecryptedPayload` keep their frozen meaning; V2 defines `DropCapability`, a V2 `ContactBundle`, `ReceiveProfile`, a V2 payload, and a V2 envelope. A server that stores both validates each by its own `v` and never reinterprets one as the other.
+
 ## Changes requiring a new integer wire version
 
 A new version is required for any incompatible change, including:
@@ -20,7 +33,9 @@ A new version is required for any incompatible change, including:
 - changing server write/read semantics in a way clients must detect;
 - assigning protocol meaning to an unknown field that V1 consumers ignore.
 
-The proposed one-time recipient key, encrypted sender identity, and metadata-private public envelope in issue #1 are incompatible with V1 and require a versioned protocol.
+The one-time recipient key, encrypted sender identity, and metadata-private public envelope from issue #1 are incompatible with V1; they are carried by draft V2, not by any reinterpretation of `v: 1`.
+
+The optional `?wait=` long-poll query (V2 §8.1) is a server extension, not a wire change: a server that ignores it still answers correctly, and V1 clients never send it.
 
 ## Optional fields
 

@@ -13,6 +13,12 @@ use linkdrop_protocol::{
 use serde::{Serialize, de::DeserializeOwned};
 use url::Url;
 
+pub mod v2;
+pub use v2::{
+    ConversationsFile, V2Direction, V2MessageRecord, V2PollSummary, V2Status,
+    format_v2_conversations, format_v2_messages, format_v2_poll_summary,
+};
+
 #[derive(Debug, Clone)]
 pub struct LinkdropApp {
     state_dir: PathBuf,
@@ -586,7 +592,7 @@ impl LinkdropApp {
     }
 }
 
-fn drop_ref_url(drop: &DropRef) -> Result<Url> {
+pub(crate) fn drop_ref_url(drop: &DropRef) -> Result<Url> {
     let mut base = validate_server_url(&drop.server, true)?;
     if !base.path().ends_with('/') {
         let path = format!("{}/", base.path().trim_end_matches('/'));

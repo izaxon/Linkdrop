@@ -3,6 +3,7 @@ mod encoding;
 mod error;
 mod model;
 mod state;
+pub mod v2;
 
 pub use crypto::{
     OpenedEnvelope, decrypt_envelope, encrypt_payload_for_contact, generate_contact_id,
